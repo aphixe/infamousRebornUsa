@@ -24,6 +24,7 @@
 
 #include "rsx_ui_trainer.h"
 #include "../input/pad_prompt_mode.h"
+#include "../audio/audio_volume.h"
 #ifdef PS3RECOMP_SDL3
 #include "../input/pad_sdl3.h"
 #endif
@@ -1062,13 +1063,43 @@ static void fps_build(void)
     text_draw(t, (int)strlen(t), 28.0f, 16.0f + 20.0f - sz * 0.62f, sz, fg);
 }
 static void uiov_draw_list(ID3D12GraphicsCommandList* cl, D3D12_CPU_DESCRIPTOR_HANDLE rtv, unsigned bbw, unsigned bbh);
+static int volume_visible(void)
+{
+    unsigned age;
+    return ps3_audio_volume_status(&age) != -1 && age < 2200;
+}
+static void volume_build(void)
+{
+    unsigned age;
+    const int percent = ps3_audio_volume_status(&age);
+    if (percent == -1 || age >= 2200) return;
+    const float alpha = age > 1800 ? (2200 - age) / 400.0f : 1.0f;
+    /* 24 virtual pixels from the window edges, scaled with the existing HUD.
+     * Dark card, purple accent, internal padding and a percentage + level bar. */
+    const float x = 24.0f, y = UIOV_VW_H - 24.0f - 76.0f, w = 252.0f;
+    float bg[4], fg[4], accent[4], track[4];
+    rgba(bg, 0.055f, 0.045f, 0.08f, 0.92f * alpha);
+    rgba(fg, 1, 1, 1, alpha);
+    rgba(accent, 0.70f, 0.42f, 1.0f, alpha);
+    rgba(track, 0.25f, 0.22f, 0.31f, alpha);
+    rect(x, y, x + w, y + 76.0f, bg, bg, 0);
+    rect(x, y, x + 3.0f, y + 76.0f, accent, accent, 0);
+    char label[48];
+    if (percent < 0) snprintf(label, sizeof label, "Audio unavailable");
+    else snprintf(label, sizeof label, "Volume  %d%%", percent);
+    text_draw(label, (int)strlen(label), x + 18.0f, y + 12.0f, 24.0f, fg);
+    rect(x + 18.0f, y + 53.0f, x + w - 18.0f, y + 59.0f, track, track, 0);
+    if (percent > 0) rect(x + 18.0f, y + 53.0f,
+        x + 18.0f + (w - 36.0f) * percent / 100.0f, y + 59.0f, accent, accent, 0);
+}
 static void fps_only(ID3D12Device* dev, ID3D12GraphicsCommandList* cl, D3D12_CPU_DESCRIPTOR_HANDLE rtv, unsigned bbw, unsigned bbh, DXGI_FORMAT rtfmt)
 {
-    if (!g_uiov_show_fps || !font_load() || !gfx_init(dev, rtfmt)) return;
+    if ((!g_uiov_show_fps && !volume_visible()) || !font_load() || !gfx_init(dev, rtfmt)) return;
     s_k = bbh / UIOV_VW_H; s_vw = bbw / s_k;
     s_vbi = (s_vbi + 1) % UIOV_FRAMES;
     s_v = s_vbmap[s_vbi]; s_nv = 0;
     fps_build();
+    volume_build();
     if (s_nv) uiov_draw_list(cl, rtv, bbw, bbh);
 }
 void uiov_render(ID3D12Device* dev, ID3D12GraphicsCommandList* cl, D3D12_CPU_DESCRIPTOR_HANDLE rtv,
@@ -1088,6 +1119,7 @@ void uiov_render(ID3D12Device* dev, ID3D12GraphicsCommandList* cl, D3D12_CPU_DES
             else if (s_menu_open) build_menu();
             else { if (s_hint_on) build_hint(); if (s_wm_on) build_watermark(); else tr_hud_build(); }   /* v238 */
             fps_build();   /* v212 */
+            volume_build();
             if (s_nv) uiov_draw_list(cl, rtv, bbw, bbh);
             return;
         }
@@ -1159,6 +1191,7 @@ void uiov_render(ID3D12Device* dev, ID3D12GraphicsCommandList* cl, D3D12_CPU_DES
     s_nb = active ? nb : 0;                      /* button rects for next frame's mouse test */
     if (s_nb) memcpy(s_br, br, sizeof(BtnRect) * s_nb);
     fps_build();   /* v212 */
+    volume_build();
     if (!s_nv) return;
     uiov_draw_list(cl, rtv, bbw, bbh);
 }

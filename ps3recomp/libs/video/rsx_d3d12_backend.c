@@ -1340,6 +1340,20 @@ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == '\r') return 0;   /* no "invalid menu key" beep for Alt+Enter */
         break;
     case WM_KEYDOWN:
+        /* Main keyboard =/+ and -, plus the numpad's dedicated +/- keys.
+         * WM_KEYDOWN is delivered only to the game window; leave Ctrl/Alt
+         * combinations alone. Shift is allowed for the standard + key. */
+        if ((wp == VK_OEM_PLUS || wp == VK_ADD || wp == VK_OEM_MINUS || wp == VK_SUBTRACT) &&
+            !(GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_MENU) & 0x8000)) {
+            extern void ps3_audio_volume_step(int);
+            static DWORD last_volume_ms;
+            const DWORD now = GetTickCount();
+            if (!(lp & (1 << 30)) || now - last_volume_ms >= 100) {
+                last_volume_ms = now;
+                ps3_audio_volume_step((wp == VK_OEM_PLUS || wp == VK_ADD) ? 5 : -5);
+            }
+            return 0;
+        }
         /* v155: Esc no longer closes the game (cellPad maps it to Start = pause menu); close with the
          * window's X. ESC_QUITS=1 restores the old behaviour. F1 = borderless fullscreen <-> window. */
         if (wp == VK_ESCAPE) {

@@ -14,6 +14,7 @@
 
 #include "../../runtime/memory/vm.h"   /* vm_commit */
 #include "cellAudio.h"
+#include "audio_volume.h"
 #include "../../runtime/ppu/ppu_memory.h"   /* vm_base, vm_read64, vm_write32 */
 #include <stdio.h>
 #include <string.h>
@@ -21,6 +22,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <time.h>    /* v145 */
+#include <wchar.h>
 
 /* Event-queue push/lookup (runtime/syscalls/sys_event.c). Forward-declared
  * rather than including sys_event.h to avoid pulling PPU context/syscall
@@ -243,6 +245,87 @@ static IAudioRenderClient*  s_wasapi_render = NULL;
 static HANDLE               s_wasapi_event  = NULL;
 static UINT32               s_wasapi_buf_frames = 0;
 
+static volatile LONG s_volume_delta, s_volume_percent = -1, s_volume_tick, s_volume_ready;
+
+/* Separate from settings.ini: the in-game video/settings menu rewrites that
+ * file. Resolve against the player's working directory, like its save files. */
+static int audio_volume_ini_path(wchar_t path[MAX_PATH])
+{
+    DWORD n = GetFullPathNameW(L"audio.ini", MAX_PATH, path, NULL);
+    return n > 0 && n < MAX_PATH;
+}
+
+static int audio_volume_load(void)
+{
+    wchar_t path[MAX_PATH], value[32], *end;
+    if (!audio_volume_ini_path(path)) return -1;
+    if (!GetPrivateProfileStringW(L"audio", L"volume", L"", value, 32, path)) return -1;
+    long percent = wcstol(value, &end, 10);
+    if (end == value || *end || percent < 0 || percent > 100) return -1;
+    return (int)percent;
+}
+
+static void audio_volume_save(int percent)
+{
+    wchar_t path[MAX_PATH], value[16];
+    swprintf(value, 16, L"%d", percent);
+    if (!audio_volume_ini_path(path) ||
+        !WritePrivateProfileStringW(L"audio", L"volume", value, path))
+        fprintf(stderr, "[volume] Could not save audio.ini (Windows error %lu)\n", (unsigned long)GetLastError());
+}
+
+static void audio_volume_result(int percent)
+{
+    InterlockedExchange(&s_volume_percent, percent);
+    InterlockedExchange(&s_volume_tick, (LONG)GetTickCount());
+}
+
+void ps3_audio_volume_step(int delta_percent)
+{
+    /* Bound queued repeats while a busy audio thread catches up. */
+    LONG before, after;
+    do {
+        before = InterlockedCompareExchange(&s_volume_delta, 0, 0);
+        after = before + delta_percent;
+        if (after > 100) after = 100;
+        if (after < -100) after = -100;
+    } while (InterlockedCompareExchange(&s_volume_delta, after, before) != before);
+    if (!InterlockedCompareExchange(&s_volume_ready, 0, 0)) audio_volume_result(-2);
+}
+
+int ps3_audio_volume_status(unsigned* elapsed_ms)
+{
+    const LONG tick = InterlockedCompareExchange(&s_volume_tick, 0, 0);
+    *elapsed_ms = (DWORD)GetTickCount() - (DWORD)tick;
+    return (int)InterlockedCompareExchange(&s_volume_percent, 0, 0);
+}
+
+static void audio_volume_apply(void)
+{
+    const LONG delta = InterlockedExchange(&s_volume_delta, 0);
+    if (!delta) return;
+    ISimpleAudioVolume* volume = NULL;
+    HRESULT hr = s_wasapi_client ? s_wasapi_client->lpVtbl->GetService(
+        s_wasapi_client, &ps3r_IID_ISimpleAudioVolume, (void**)&volume) : E_FAIL;
+    float level = 0.0f;
+    int percent = 0;
+    if (SUCCEEDED(hr)) hr = volume->lpVtbl->GetMasterVolume(volume, &level);
+    if (SUCCEEDED(hr)) {
+        percent = (int)(level * 100.0f + 0.5f) + (int)delta;
+        if (percent < 0) percent = 0;
+        if (percent > 100) percent = 100;
+        hr = volume->lpVtbl->SetMasterVolume(volume, percent / 100.0f, NULL);
+        if (SUCCEEDED(hr) && percent > 0) hr = volume->lpVtbl->SetMute(volume, FALSE, NULL);
+    }
+    if (volume) volume->lpVtbl->Release(volume);
+    audio_volume_result(SUCCEEDED(hr) ? percent : -2);
+    if (FAILED(hr)) fprintf(stderr, "[volume] Cannot adjust game audio: 0x%08lX\n", (unsigned long)hr);
+    else {
+        audio_volume_save(percent);
+        fprintf(stderr, "[volume] Game audio %d%%\n", percent);
+    }
+}
+
 static int audio_backend_init(void)
 {
     HRESULT hr;
@@ -356,13 +439,31 @@ static int audio_backend_init(void)
             return -1;
         }
         fprintf(stderr, "[debug-player] Windows audio session set to %d%%\n", pct);
+    } else {
+        /* Restore before playback. A debug launch above deliberately overrides
+         * this value without overwriting the user's saved preference. */
+        const int pct = audio_volume_load();
+        if (pct >= 0) {
+            ISimpleAudioVolume* volume = NULL;
+            hr = s_wasapi_client->lpVtbl->GetService(
+                s_wasapi_client, &ps3r_IID_ISimpleAudioVolume, (void**)&volume);
+            if (SUCCEEDED(hr)) {
+                hr = volume->lpVtbl->SetMasterVolume(volume, pct / 100.0f, NULL);
+                if (SUCCEEDED(hr) && pct > 0) hr = volume->lpVtbl->SetMute(volume, FALSE, NULL);
+                volume->lpVtbl->Release(volume);
+            }
+            if (SUCCEEDED(hr)) fprintf(stderr, "[volume] Restored %d%% from audio.ini\n", pct);
+            else fprintf(stderr, "[volume] Could not restore audio.ini: 0x%08lX\n", (unsigned long)hr);
+        }
     }
     s_wasapi_client->lpVtbl->Start(s_wasapi_client);
+    InterlockedExchange(&s_volume_ready, 1);
     return 0;
 }
 
 static void audio_backend_shutdown(void)
 {
+    InterlockedExchange(&s_volume_ready, 0);
     if (s_wasapi_client) {
         s_wasapi_client->lpVtbl->Stop(s_wasapi_client);
     }
@@ -382,6 +483,7 @@ static void audio_backend_shutdown(void)
 
 static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
 {
+    audio_volume_apply();
     if (!s_wasapi_render) return;
 
     UINT32 padding = 0;
@@ -407,6 +509,7 @@ static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
 /* Frames the device can take right now; -1 with no device open. */
 static int audio_backend_room(void)
 {
+    audio_volume_apply();
     if (!s_wasapi_client) return -1;
     UINT32 padding = 0;
     const HRESULT hr = s_wasapi_client->lpVtbl->GetCurrentPadding(s_wasapi_client, &padding);
@@ -438,6 +541,11 @@ static int audio_backend_queued(void)
 
 
 #endif /* AUDIO_BACKEND_WASAPI */
+
+#if !AUDIO_BACKEND_WASAPI
+void ps3_audio_volume_step(int delta_percent) { (void)delta_percent; }
+int ps3_audio_volume_status(unsigned* elapsed_ms) { *elapsed_ms = 0; return -1; }
+#endif
 
 /* ---------------------------------------------------------------------------
  * Mixing

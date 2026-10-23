@@ -872,6 +872,7 @@ fn check_update_payload(source: &Source) -> Result<(), String> {
                     | "savedata"
                     | "ps3_game"
                     | "settings.ini"
+                    | "audio.ini"
             )
         }) || lower.starts_with("infamous-recomp/assets/")
         {
@@ -1561,6 +1562,7 @@ mod tests {
     fn update_refuses_packages_containing_player_data() {
         for name in [
             "infamous-recomp/settings.ini",
+            "infamous-recomp/audio.ini",
             "infamous-recomp/gamedata/save.dat",
             ".installer/state",
             "game/PS3_GAME/USRDIR/EBOOT.BIN",
@@ -1589,6 +1591,7 @@ mod tests {
         let kept = [
             (".installer/state", b"existing build state".as_slice()),
             (".installer/usa_game", b"existing game folder".as_slice()),
+            ("infamous-recomp/audio.ini", b"[audio]\nvolume=36\n".as_slice()),
             (
                 "infamous-recomp/settings.ini",
                 b"RES_SCALE=1280x800\nKBM_GLYPHS=1\n".as_slice(),

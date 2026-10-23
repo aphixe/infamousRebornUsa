@@ -91,6 +91,11 @@ mouse to look, Space = Cross, Esc = Start / pause).
 **F10** opens the in-game trainer (God Mode, Infinite Energy, Super Speed, Player Model and more).
 `TRAINER=0` turns it off.
 
+**= / +** or **numpad +** raises game volume; **-** or **numpad -** lowers it, in 5% steps.
+A padded bottom-left indicator shows the percentage. Adjustments are saved to
+`infamous-recomp/audio.ini` (`[audio]`, `volume=0` through `100`) and restored on launch.
+Explicit debug launches still start at the requested debug volume.
+
 Your saves live in the install folder (`infamous-recomp/gamedata`); they are never part of an update or
 a published tree.
 

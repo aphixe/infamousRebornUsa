@@ -307,7 +307,7 @@ exclude = [
   # working folders, test saves, personal settings and one-off scripts in the port folder
   "infamous-recomp/_*/", "infamous-recomp/gamedata*/", "**/savedata*/",
   "infamous-recomp/*.cmd", "infamous-recomp/tools/*.cmd", "infamous-recomp/tools/v242b/",
-  "infamous-recomp/settings.ini", "infamous-recomp/memcmd*", "infamous-recomp/good", "**/*.out",
+  "infamous-recomp/settings.ini", "infamous-recomp/audio.ini", "infamous-recomp/memcmd*", "infamous-recomp/good", "**/*.out",
   "installer/launcher-preview.png",
 ]
 keep = [

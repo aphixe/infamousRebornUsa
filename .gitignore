@@ -39,6 +39,7 @@ infamous-recomp/memdump/
 infamous-recomp/shadercache/
 infamous-recomp/gamedata/
 infamous-recomp/settings.ini
+infamous-recomp/audio.ini
 *.log
 *.out.log
 *.err.log

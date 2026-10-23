@@ -556,6 +556,7 @@ fn protected(m: &Manifest, p: &str) -> bool {
     }
     // The binaries the setup program places next to the tree (not in the repository).
     l == "installer/infamous-installer.exe"
+        || l == "infamous-recomp/audio.ini"
         || l == "installer/infamous-installer"
         || l == format!("{}.exe", m.game_title.to_ascii_lowercase())
         || l.starts_with("installer/target/")
@@ -880,6 +881,14 @@ pub fn touched(plan: &Plan) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_audio_volume_is_protected_from_updates() {
+        let m = Manifest::load(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/infamous.toml"))).unwrap();
+        assert!(protected(&m, "infamous-recomp/audio.ini"));
+        assert!(protected(&m, "INFAMOUS-RECOMP/AUDIO.INI"));
+        assert!(util::any_match(&m.export_exclude, "infamous-recomp/audio.ini"));
+    }
 
     #[test]
     fn json_tree() {
