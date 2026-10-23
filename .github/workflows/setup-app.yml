@@ -4,10 +4,15 @@ on:
   push:
     paths:
       - "installer/**"
+      - "tools/volume-update/**"
+      - "tools/Build-Release.ps1"
       - ".github/workflows/setup-app.yml"
   pull_request:
     paths:
       - "installer/**"
+      - "tools/volume-update/**"
+      - "tools/Build-Release.ps1"
+      - ".github/workflows/setup-app.yml"
   workflow_dispatch:
 
 jobs:
@@ -26,10 +31,16 @@ jobs:
           cache-workspaces: installer
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: Test installer
+        run: cargo test --locked
 
       - name: Build
         run: cargo build --release --locked
+
+      - name: Build no-compilation volume updater
+        run: ../tools/volume-update/Build-VolumeUpdater.ps1 -Output dist/ci/infamous-volume-update.exe
 
       - uses: actions/upload-artifact@v4
         with:
@@ -38,4 +49,5 @@ jobs:
             installer/target/release/infamous-installer.exe
             installer/target/release/infamous-setup.exe
             installer/target/release/infamous-launch.exe
+            dist/ci/infamous-volume-update.exe
           if-no-files-found: error

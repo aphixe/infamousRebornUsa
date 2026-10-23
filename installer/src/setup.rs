@@ -1591,7 +1591,10 @@ mod tests {
         let kept = [
             (".installer/state", b"existing build state".as_slice()),
             (".installer/usa_game", b"existing game folder".as_slice()),
-            ("infamous-recomp/audio.ini", b"[audio]\nvolume=36\n".as_slice()),
+            (
+                "infamous-recomp/audio.ini",
+                b"[audio]\nvolume=36\n".as_slice(),
+            ),
             (
                 "infamous-recomp/settings.ini",
                 b"RES_SCALE=1280x800\nKBM_GLYPHS=1\n".as_slice(),

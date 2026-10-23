@@ -193,8 +193,31 @@ impl Launch {
             use std::os::windows::process::CommandExt;
             c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
-        c.spawn()
+        let child = c
+            .spawn()
             .map_err(|e| format!("Could not start {}: {e}", self.exe.display()))?;
+        // A no-build update for older players installs this optional companion.
+        // It exits immediately when the game already has native volume controls.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let helper = self.root.join("installer/infamous-volume.exe");
+            if helper.is_file() {
+                Command::new(helper)
+                    .arg("--watch")
+                    .arg(child.id().to_string())
+                    .arg(&self.cwd)
+                    .arg(&self.exe)
+                    .creation_flags(0x0800_0000)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .map_err(|e| {
+                        format!("Game started, but volume controls could not start: {e}")
+                    })?;
+            }
+        }
         Ok(())
     }
 }

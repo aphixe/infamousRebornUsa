@@ -884,10 +884,17 @@ mod tests {
 
     #[test]
     fn saved_audio_volume_is_protected_from_updates() {
-        let m = Manifest::load(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/infamous.toml"))).unwrap();
+        let m = Manifest::load(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/infamous.toml"
+        )))
+        .unwrap();
         assert!(protected(&m, "infamous-recomp/audio.ini"));
         assert!(protected(&m, "INFAMOUS-RECOMP/AUDIO.INI"));
-        assert!(util::any_match(&m.export_exclude, "infamous-recomp/audio.ini"));
+        assert!(util::any_match(
+            &m.export_exclude,
+            "infamous-recomp/audio.ini"
+        ));
     }
 
     #[test]

@@ -127,6 +127,20 @@ rpcs3.exe in the usual places or asks for it.
 
 ## For the maintainer
 
+Build release downloads from the repository root with:
+
+```powershell
+tools/Build-Release.ps1 -Version 2.1
+```
+
+This formats all Rust sources, verifies the same formatting rule as GitHub Actions,
+runs the installer tests, and builds the full Setup and no-compilation Quick Update
+EXEs with checksums under `dist/release/v2.1`. It stops on any failed check. Commit
+the formatted source changes before pushing or creating the release tag; uploading
+download files alone does not update the source revision checked by Actions.
+
+For a check without rewriting files: `cd installer; cargo fmt --all -- --check`.
+
 The patch set has to be created once on the development tree, and again whenever the
 maintained generated files change:
 

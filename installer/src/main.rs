@@ -371,7 +371,9 @@ impl Session {
         if !bin.is_file() {
             bail!(
                 "neither EBOOT.elf nor EBOOT.BIN is in {}",
-                bin.parent().map(|p| p.display().to_string()).unwrap_or_default()
+                bin.parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
             );
         }
         match game::classify(bin)? {
@@ -680,8 +682,14 @@ fn region_args(s: &Session, region: &str) -> Vec<String> {
     let slash = |p: PathBuf| util::path_str(&p).replace('\\', "/");
     vec![
         format!("-DINFAMOUS_REGION={region}"),
-        format!("-DPORT_PPU_MEMLEAN_LIST={}", slash(tools.join(format!("v243A_mem_hot{sfx}.txt")))),
-        format!("-DPORT_PPU_VR_LIST={}", slash(tools.join(format!("v241B_vr_hot{sfx}.txt")))),
+        format!(
+            "-DPORT_PPU_MEMLEAN_LIST={}",
+            slash(tools.join(format!("v243A_mem_hot{sfx}.txt")))
+        ),
+        format!(
+            "-DPORT_PPU_VR_LIST={}",
+            slash(tools.join(format!("v241B_vr_hot{sfx}.txt")))
+        ),
     ]
 }
 
@@ -689,7 +697,9 @@ fn region_args(s: &Session, region: &str) -> Vec<String> {
 /// generation pipeline (tools/build_usa.py), the build with INFAMOUS_REGION=USA, and a launcher that
 /// points the game at the dump.
 fn cmd_install_usa(s: &Session, g: &game::Game) -> Result<()> {
-    util::info("USA release (BCUS98119): the port's patches are relocated onto this disc's executable.");
+    util::info(
+        "USA release (BCUS98119): the port's patches are relocated onto this disc's executable.",
+    );
     let py = s.python()?;
     util::heading("Executable");
     let work = s.root.join(".installer").join("usa");
@@ -864,7 +874,11 @@ fn write_update_script(s: &Session) -> Result<()> {
 }
 
 /// The manifest's launch environment with `extra` replacing (or adding) entries.
-fn launch_env(s: &Session, vars: &Vars, extra: &[(String, String)]) -> Result<Vec<(String, String)>> {
+fn launch_env(
+    s: &Session,
+    vars: &Vars,
+    extra: &[(String, String)],
+) -> Result<Vec<(String, String)>> {
     let mut env = Vec::new();
     for (k, v) in &s.m.launch_env {
         if !extra.iter().any(|(ek, _)| ek == k) {
