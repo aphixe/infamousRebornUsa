@@ -245,6 +245,7 @@ struct App {
 
     /// An existing installation found at the default location (or picked), offered for updating.
     existing: Option<PathBuf>,
+    locate_error: Option<String>,
     upd: Arc<Mutex<(u64, UpdState)>>,
     upd_gen: u64,
     updating: bool,
@@ -288,6 +289,7 @@ impl App {
             show_log: false,
             confirm_cancel: false,
             existing: None,
+            locate_error: None,
             upd: Arc::new(Mutex::new((0, UpdState::Checking))),
             upd_gen: 0,
             updating: false,
@@ -308,8 +310,12 @@ impl App {
         }
         app.location = util::path_str(&setup::default_location(&app.title));
         app.check_reqs();
-        let here = PathBuf::from(app.location.clone());
-        app.find_existing(here);
+        let cwd = std::env::current_dir().unwrap_or_default();
+        if let Some(here) = setup::find_existing_install(&setup_exe, &cwd, Path::new(&app.location))
+        {
+            app.location = util::path_str(&here);
+            app.find_existing(here);
+        }
         // For screenshots / testing: open on a given page.
         if let Ok(pg) = std::env::var("INFAMOUS_SETUP_PAGE") {
             app.page = match pg.as_str() {
@@ -337,6 +343,18 @@ impl App {
             return false;
         }
         self.existing = Some(dir.clone());
+        if matches!(self.source, Some(setup::Source::Embedded(_))) {
+            *self.upd.lock().unwrap() = (
+                self.upd_gen,
+                UpdState::Done(Ok(UpdateInfo {
+                    available: true,
+                    files: 0,
+                    bytes: self.payload_bytes,
+                    version: "this Setup".into(),
+                })),
+            );
+            return true;
+        }
         self.upd_gen += 1;
         let gen = self.upd_gen;
         *self.upd.lock().unwrap() = (gen, UpdState::Checking);
@@ -383,6 +401,7 @@ impl App {
             return;
         };
         let st = self.upd.lock().unwrap().1.clone();
+        let packaged = matches!(self.source, Some(setup::Source::Embedded(_)));
         let mut do_update = false;
         let mut recheck = false;
         let mut other = false;
@@ -407,7 +426,9 @@ impl App {
                         ))
                         .strong(),
                     );
-                    let (text, color) = match &st {
+                    let (text, color) = if packaged {
+                        ("Apply the update bundled in this Setup to your existing installation. Your game files, saves, settings and shortcuts are kept. Close the game before updating.".to_string(), MUTED)
+                    } else { match &st {
                         UpdState::Checking => {
                             ("Checking GitHub for a newer version...".to_string(), MUTED)
                         }
@@ -428,17 +449,17 @@ impl App {
                             (format!("Up to date (version {}).", i.version), OK)
                         }
                         UpdState::Done(Err(e)) => (e.clone(), BAD),
-                    };
+                    }};
                     ui.label(RichText::new(text).small().color(color));
                 });
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let can = !matches!(st, UpdState::Checking);
-                if ui.add_enabled(can, primary("Update now")).on_hover_text("Download only the files that changed on GitHub, then rebuild what they affect.").clicked() {
+                if ui.add_enabled(can, primary(if packaged { "Apply this update" } else { "Update now" })).on_hover_text(if packaged { "Use this Setup's bundled files and rebuild the existing game installation." } else { "Download only the files that changed on GitHub, then rebuild what they affect." }).clicked() {
                     do_update = true;
                 }
-                if ui.add_enabled(can, secondary("Check again")).clicked() {
+                if !packaged && ui.add_enabled(can, secondary("Check again")).clicked() {
                     recheck = true;
                 }
                 if ui.add(secondary("Another folder...")).clicked() {
@@ -644,6 +665,32 @@ impl App {
         }
         if self.existing.is_some() {
             self.update_card(ui);
+        } else {
+            card(ui, |ui| {
+                ui.label(RichText::new("Already installed?").strong());
+                ui.label("Drop this Setup into your existing game folder, or choose that folder below to update it without copying the disc again.");
+                if ui
+                    .add(secondary("Choose existing installation..."))
+                    .clicked()
+                {
+                    if let Some(dir) = rfd::FileDialog::new()
+                        .set_title("Choose the existing inFamous installation")
+                        .pick_folder()
+                    {
+                        if self.find_existing(dir.clone()) {
+                            self.locate_error = None;
+                        } else {
+                            self.locate_error = Some(format!(
+                                "{} does not contain a completed installation.",
+                                dir.display()
+                            ));
+                        }
+                    }
+                }
+                if let Some(error) = &self.locate_error {
+                    ui.label(RichText::new(error).small().color(BAD));
+                }
+            });
         }
         card(ui, |ui| {
             ui.label(RichText::new("You will need").strong());
@@ -711,7 +758,17 @@ impl App {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if ui.add_enabled(!busy, primary("Install")).clicked() {
+                                        if ui
+                                            .add_enabled(
+                                                !busy,
+                                                primary(if i == 0 {
+                                                    "Install"
+                                                } else {
+                                                    "Install / repair"
+                                                }),
+                                            )
+                                            .clicked()
+                                        {
                                             install = Some(i == 0);
                                         }
                                     },
@@ -720,11 +777,33 @@ impl App {
                         });
                         let (txt, col) = match c {
                             Check::Ok(s) => (s.clone(), MUTED),
-                            Check::Missing(s) => (format!("Not found. {}\n{s}", what), WARN),
+                            Check::Missing(s) => (
+                                format!(
+                                    "{} {}\n{s}",
+                                    if i == 0 {
+                                        "Not found."
+                                    } else {
+                                        "Build tools are not ready."
+                                    },
+                                    what
+                                ),
+                                WARN,
+                            ),
                             Check::Installing(s) => (s.clone(), ACCENT_HI),
                             Check::Checking | Check::Unknown => ("Checking...".into(), MUTED),
                         };
                         ui.label(RichText::new(txt).small().color(col));
+                        if i == 1
+                            && infamous_installer::toolchain::visual_studio_installer().is_file()
+                            && ui
+                                .add_enabled(!busy, secondary("Open Visual Studio Installer"))
+                                .clicked()
+                        {
+                            if let Err(error) = setup::open_build_tools_settings() {
+                                self.reqs.lock().unwrap().log.push(error);
+                                self.show_req_log = true;
+                            }
+                        }
                     });
                 });
             });
@@ -1103,7 +1182,11 @@ impl App {
             Self::heading(
                 ui,
                 &format!("{} is up to date", self.title),
-                "The latest version from GitHub is installed.",
+                if matches!(self.source, Some(setup::Source::Embedded(_))) {
+                    "The update from this Setup is installed."
+                } else {
+                    "The latest version from GitHub is installed."
+                },
             );
         } else {
             Self::heading(

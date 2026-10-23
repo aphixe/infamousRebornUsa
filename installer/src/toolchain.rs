@@ -185,37 +185,42 @@ fn env_path(env: &[(String, String)]) -> Option<String> {
         .map(|(_, v)| v.clone())
 }
 
-#[cfg(windows)]
-fn vs_installation() -> Option<PathBuf> {
-    let pf =
-        std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
-    let vswhere = Path::new(&pf).join(r"Microsoft Visual Studio\Installer\vswhere.exe");
-    if !vswhere.is_file() {
-        return None;
-    }
-    let base = [
-        "-latest",
+pub fn visual_studio_installer() -> PathBuf {
+    Path::new(
+        &std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into()),
+    )
+    .join(r"Microsoft Visual Studio\Installer\setup.exe")
+}
+
+pub fn visual_studio_installations(require_cpp: bool, build_tools_only: bool) -> Vec<PathBuf> {
+    let vswhere = visual_studio_installer().with_file_name("vswhere.exe");
+    let mut cmd = Command::new(vswhere);
+    cmd.args([
         "-products",
-        "*",
+        if build_tools_only {
+            "Microsoft.VisualStudio.Product.BuildTools"
+        } else {
+            "*"
+        },
+        "-version",
+        "[17.0,)",
         "-property",
         "installationPath",
-        "-requires",
-        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-    ];
-    // Prefer an installation that also has "C++ Clang tools for Windows".
-    for extra in [Some("Microsoft.VisualStudio.Component.VC.Llvm.Clang"), None] {
-        let mut c = Command::new(&vswhere);
-        c.args(base);
-        if let Some(e) = extra {
-            c.arg(e);
-        }
-        if let Some(out) = util::capture(&mut c) {
-            if let Some(line) = out.lines().map(str::trim).find(|l| !l.is_empty()) {
-                return Some(PathBuf::from(line));
-            }
-        }
+        "-utf8",
+    ]);
+    if require_cpp {
+        cmd.args([
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+        ]);
     }
-    None
+    util::capture(&mut cmd)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
 #[cfg(windows)]
@@ -243,40 +248,122 @@ fn vs_dev_env(vs: &Path) -> Result<Vec<(String, String)>> {
     Ok(env)
 }
 
-pub fn detect_build_env() -> Result<BuildEnv> {
-    #[cfg(windows)]
-    {
-        let vs = vs_installation().ctx(|| {
-            "Visual Studio 2022 (or Build Tools) with \"Desktop development with C++\" was not found.\n    \
-             Install Build Tools from https://visualstudio.microsoft.com/downloads/ and select the workload\n    \
-             \"Desktop development with C++\" plus the component \"C++ Clang Compiler for Windows\"."
-        })?;
-        let env = vs_dev_env(&vs)?;
-        let path = env_path(&env);
-        let ide = vs.join(r"Common7\IDE\CommonExtensions\Microsoft\CMake");
-        let find = |name: &str, fallback: PathBuf| -> Option<PathBuf> {
-            util::find_in_path(name, path.as_deref()).or(if fallback.is_file() {
-                Some(fallback)
-            } else {
-                None
-            })
-        };
-        let cc = find("clang-cl", vs.join(r"VC\Tools\Llvm\x64\bin\clang-cl.exe")).ctx(|| {
+#[cfg(windows)]
+fn build_env_for_vs(vs: &Path) -> Result<BuildEnv> {
+    let env = vs_dev_env(vs)?;
+    let path = env_path(&env);
+    let ide = vs.join(r"Common7\IDE\CommonExtensions\Microsoft\CMake");
+    let find = |name: &str, fallback: PathBuf| -> Option<PathBuf> {
+        (if fallback.is_file() {
+            Some(fallback)
+        } else {
+            None
+        })
+        .or_else(|| util::find_in_path(name, path.as_deref()))
+    };
+    let cc = [vs.join(r"VC\Tools\Llvm\x64\bin\clang-cl.exe"),vs.join(r"VC\Tools\Llvm\bin\clang-cl.exe")]
+            .into_iter().find(|p|p.is_file()).or_else(||util::find_in_path("clang-cl",path.as_deref())).ctx(|| {
             "clang-cl was not found. In the Visual Studio Installer, modify your installation and add\n    \
              \"C++ Clang Compiler for Windows\" (Individual components)."
         })?;
-        let cmake = find("cmake", ide.join(r"CMake\bin\cmake.exe"))
-            .ctx(|| "CMake was not found (add \"C++ CMake tools for Windows\" in the Visual Studio Installer)")?;
-        let ninja = find("ninja", ide.join(r"Ninja\ninja.exe"))
-            .ctx(|| "Ninja was not found (add \"C++ CMake tools for Windows\" in the Visual Studio Installer)")?;
-        Ok(BuildEnv {
-            env,
-            cmake,
-            ninja,
-            cxx: cc.clone(),
-            cc,
-            vs_path: Some(vs),
-        })
+    let cmake = find("cmake", ide.join(r"CMake\bin\cmake.exe")).ctx(|| {
+        "CMake was not found (add \"C++ CMake tools for Windows\" in the Visual Studio Installer)"
+    })?;
+    let ninja = find("ninja", ide.join(r"Ninja\ninja.exe")).ctx(|| {
+        "Ninja was not found (add \"C++ CMake tools for Windows\" in the Visual Studio Installer)"
+    })?;
+    let result = BuildEnv {
+        env,
+        cmake,
+        ninja,
+        cxx: cc.clone(),
+        cc,
+        vs_path: Some(vs.to_path_buf()),
+    };
+    check_windows_compiler(&result)?;
+    Ok(result)
+}
+
+#[cfg(windows)]
+fn check_windows_compiler(env: &BuildEnv) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    for tool in ["rc", "mt"] {
+        if util::find_in_path(tool, env_path(&env.env).as_deref()).is_none() {
+            bail!("Windows SDK build tool {tool}.exe is missing from the x64 developer environment. Use Install / repair to add the Windows SDK.");
+        }
+    }
+    for tool in [&env.cmake, &env.ninja] {
+        if util::capture(
+            Command::new(tool)
+                .arg("--version")
+                .envs(env.env.iter().cloned()),
+        )
+        .is_none()
+        {
+            bail!(
+                "{} could not run; install/repair C++ CMake tools for Windows",
+                tool.display()
+            );
+        }
+    }
+    let work = std::env::temp_dir().join(format!(
+        "infamous-compiler-check-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir(&work)?;
+    let source = work.join("check.cpp");
+    let object = work.join("check.obj");
+    let exe = work.join("check.exe");
+    fs::write(&source,b"#include <vector>\n#include <windows.h>\n#include <d3d12.h>\nstatic_assert(sizeof(void*)==8);\nint main(){std::vector<int> v{1}; D3D12_RESOURCE_DESC d{}; return v[0] && GetCurrentProcessId() && sizeof(d) ? 0 : 1;}\n")?;
+    let result = Command::new(&env.cc)
+        .args([
+            "/nologo",
+            "/EHsc",
+            "/std:c++17",
+            "--target=x86_64-pc-windows-msvc",
+        ])
+        .arg(&source)
+        .arg(format!("/Fo{}", object.display()))
+        .arg(format!("/Fe{}", exe.display()))
+        .args(["/link", "kernel32.lib"])
+        .envs(env.env.iter().cloned())
+        .creation_flags(0x0800_0000)
+        .output();
+    for path in [&source, &object, &exe] {
+        let _ = fs::remove_file(path);
+    }
+    let _ = fs::remove_dir(&work);
+    let output = result.ctx(|| format!("Could not start {}", env.cc.display()))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stdout).to_string()
+            + &String::from_utf8_lossy(&output.stderr);
+        bail!("Clang could not compile and link an x64 Windows/DirectX program. MSVC headers/libraries or the Windows SDK are missing or incompatible.\n{}",detail.chars().take(2400).collect::<String>());
+    }
+    Ok(())
+}
+
+pub fn detect_build_env() -> Result<BuildEnv> {
+    #[cfg(windows)]
+    {
+        let candidates = visual_studio_installations(true, false);
+        let mut errors = Vec::new();
+        for vs in candidates {
+            match build_env_for_vs(&vs) {
+                Ok(env) => return Ok(env),
+                Err(e) => errors.push(format!("{}: {e}", vs.display())),
+            }
+        }
+        if errors.is_empty() {
+            bail!("Visual Studio 2022 or newer with Desktop development with C++ was not found. Use Setup's Install / repair button to add MSVC, Clang, CMake and a Windows SDK.");
+        }
+        bail!(
+            "No complete C++ build environment is ready. Use Install / repair.\n{}",
+            errors.join("\n")
+        );
     }
     #[cfg(not(windows))]
     {

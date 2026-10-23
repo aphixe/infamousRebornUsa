@@ -24,7 +24,7 @@ You need:
 
 * **Your inFamous disc dump**: the folder that contains `PS3_GAME` (European release, BCES00220).
 * **Python 3.10+** from python.org, with "Add python.exe to PATH" ticked.
-* **Visual Studio 2022 Build Tools** with the *Desktop development with C++* workload and the
+* **Visual Studio 2022 or newer (IDE or Build Tools)** with the *Desktop development with C++* workload and the
   *C++ Clang Compiler for Windows* component.
 * **RPCS3**, if your `PS3_GAME\USRDIR` has only `EBOOT.BIN` and no decrypted `EBOOT.elf`.
 * Roughly 10 GB of free disk space and 16 GB of RAM. The generated C++ files are large.
@@ -77,12 +77,32 @@ those replace the installer and the game's launcher too (a running copy is renam
 ## The setup program (what players download)
 
 `inFamous Setup.exe` is a normal Windows installer window: Welcome → Requirements (Python and
-the C++ build tools, with **Install** buttons that use winget) → Your game (pick the **.iso** or a
+the C++ build tools, with **Install / repair** for Visual Studio and **Install** for Python) → Your game (pick the **.iso** or a
 game folder; encrypted Redump images work with their `.dkey` next to them) → Install location and resolution →
 progress bar → **Play**. It carries the whole publishable tree inside itself, extracts it to the
 chosen folder, copies the game out of the disc image, runs `infamous-installer install` there and
 creates `inFamous.exe` (starts the game without a console) plus desktop/Start-menu shortcuts.
 Running it again on the same folder repairs/updates and only redoes what changed.
+**Install / repair** modifies an existing Visual Studio or Build Tools instance,
+selecting that edition's C++ desktop workload plus MSVC x64/x86, Clang, CMake/Ninja
+and the Windows SDK. Without an existing installation, Setup downloads the
+official Visual Studio 2022 Build Tools bootstrapper directly from Microsoft and
+checks its Microsoft signature. This path does not require winget. The Microsoft
+installer opens visibly and may request administrator approval. Setup handles
+restart-required results and reports an installer that is already running.
+**Open Visual Studio Installer** opens the existing installer for manual changes.
+Requirement checks try all supported installations and verify x64 Clang compilation
+and linking with MSVC/STL and DirectX/Windows SDK headers and libraries, as well as
+CMake, Ninja and SDK resource tools.
+For a drop-in update, place the new **inFamous Setup.exe** beside the installed
+**inFamous.exe**, run Setup and choose **Apply this update**. Setup detects the
+existing folder (including custom locations), applies the files bundled in the
+new Setup and rebuilds using the existing game files. It does not contact GitHub
+to decide which version to apply. Saves, settings, game data, existing shortcuts
+and installation state are preserved; the game does not need to be copied from
+the disc again. If Setup was opened elsewhere, use **Choose existing
+installation...**. Close the game before updating. The separate **Update
+inFamous** shortcut continues to check GitHub.
 The resolution selector offers 17 presets, including 720p through 4K, common 4:3,
 5:4, 16:10 and ultrawide sizes, and **1280 x 800 (Steam Deck)**. New installations
 start with 1080p selected; choosing an existing installation loads its current

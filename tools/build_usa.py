@@ -248,7 +248,9 @@ def gen_assets():
 def build(jobs):
     bdir = PORT / "build-usa"
     cmake, ninja = shutil.which("cmake"), shutil.which("ninja")
-    cc = r"C:\Program Files\LLVM\bin\clang-cl.exe"
+    cc = os.environ.get("CC") or shutil.which("clang-cl")
+    if not (cmake and ninja and cc):
+        raise SystemExit("CMake, Ninja and clang-cl are required. Run from an x64 Visual Studio developer environment or use Setup's Install / repair.")
     run(cmake, "-S", PORT, "-B", bdir, "-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={ninja}",
         f"-DCMAKE_C_COMPILER={cc}", f"-DCMAKE_CXX_COMPILER={cc}", "-DCMAKE_BUILD_TYPE=Release",
         "-DPORT_PPU_REGCACHE=ON", "-DPORT_PPU_MEMLEAN=ALL", "-DPORT_PGO=OFF", "-DINFAMOUS_REGION=USA",

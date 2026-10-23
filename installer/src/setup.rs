@@ -89,7 +89,10 @@ pub fn check_python() -> Check {
 pub fn check_build_tools() -> Check {
     match toolchain::detect_build_env() {
         Ok(env) => Check::Ok(match env.vs_path {
-            Some(p) => format!("Visual Studio Build Tools with Clang ({})", p.display()),
+            Some(p) => format!(
+                "Visual Studio C++ + Clang, CMake/Ninja and Windows SDK verified ({})",
+                p.display()
+            ),
             None => format!("clang ({})", env.cc.display()),
         }),
         Err(e) => Check::Missing(e.to_string()),
@@ -202,7 +205,6 @@ pub fn install_python(log: &(dyn Fn(String) + Sync)) -> Result<(), String> {
 }
 
 const VS_COMPONENTS: &[&str] = &[
-    "Microsoft.VisualStudio.Workload.VCTools",
     "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
     "Microsoft.VisualStudio.Component.Windows11SDK.22621",
     "Microsoft.VisualStudio.Component.VC.CMake.Project",
@@ -210,58 +212,107 @@ const VS_COMPONENTS: &[&str] = &[
     "Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset",
 ];
 
-/// Any Visual Studio 2022 installation (with or without the C++ parts).
 fn any_vs() -> Option<PathBuf> {
-    let pf =
-        std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
-    let vswhere = Path::new(&pf).join(r"Microsoft Visual Studio\Installer\vswhere.exe");
-    let out = util::capture(Command::new(vswhere).args([
-        "-products",
-        "*",
-        "-version",
-        "[17.0,18.0)",
-        "-latest",
-        "-property",
-        "installationPath",
-    ]))?;
-    out.lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .map(PathBuf::from)
+    toolchain::visual_studio_installations(false, false)
+        .into_iter()
+        .next()
+}
+
+fn vs_arguments(installation: Option<&Path>, build_tools: bool) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(path) = installation {
+        args.extend([
+            "modify".into(),
+            "--installPath".into(),
+            util::path_str(path),
+        ]);
+    } else {
+        args.push("--wait".into());
+    } // bootstrapper only; setup.exe rejects --wait
+    args.extend([
+        "--add".into(),
+        if build_tools {
+            "Microsoft.VisualStudio.Workload.VCTools"
+        } else {
+            "Microsoft.VisualStudio.Workload.NativeDesktop"
+        }
+        .into(),
+    ]);
+    for component in VS_COMPONENTS {
+        args.extend(["--add".into(), (*component).into()]);
+    }
+    args.extend(["--includeRecommended", "--passive", "--norestart"].map(String::from));
+    args
+}
+
+// Start-Process joins string arrays and loses path quoting. Supply one Windows
+// command-line string, then quote that string separately as a PowerShell literal.
+fn vs_command_line(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| {
+            let mut quoted = String::from("\"");
+            let mut slashes = 0;
+            for ch in arg.chars() {
+                if ch == '\\' {
+                    slashes += 1;
+                    continue;
+                }
+                quoted.extend(std::iter::repeat_n(
+                    '\\',
+                    if ch == '"' { slashes * 2 + 1 } else { slashes },
+                ));
+                quoted.push(ch);
+                slashes = 0;
+            }
+            quoted.extend(std::iter::repeat_n('\\', slashes * 2));
+            quoted.push('"');
+            quoted
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn vs_elevated_script(exe: &Path, args: &[String]) -> String {
+    let q = |value: &str| value.replace('\'', "''");
+    format!("$ErrorActionPreference='Stop'; try {{ $p=Start-Process -FilePath '{}' -ArgumentList '{}' -WorkingDirectory '{}' -WindowStyle Normal -Verb RunAs -Wait -PassThru; switch ($p.ExitCode) {{ 0 {{ exit 0 }} 3010 {{ Write-Output 'Installation completed; Windows restart required.'; exit 0 }} 1641 {{ Write-Output 'Installation completed; Windows restart required.'; exit 0 }} 1001 {{ throw 'Visual Studio Installer is already running. Finish or close it, then try again.' }} 1223 {{ throw 'Administrator approval was cancelled. Run Install / repair again when ready.' }} default {{ throw ('Visual Studio Installer returned '+$p.ExitCode+'. See its log in your TEMP folder.') }} }} }} catch {{ Write-Output $_.Exception.Message; exit 1 }}",
+        q(&util::path_str(exe)),q(&vs_command_line(args)),q(&util::path_str(&std::env::temp_dir())))
+}
+
+pub fn open_build_tools_settings() -> Result<(), String> {
+    let setup = toolchain::visual_studio_installer();
+    if !setup.is_file() {
+        return Err("Visual Studio Installer is not installed. Use Install / repair to download Build Tools.".into());
+    }
+    Command::new(setup)
+        .current_dir(std::env::temp_dir())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 pub fn install_build_tools(log: &(dyn Fn(String) + Sync)) -> Result<(), String> {
-    let mut adds = Vec::new();
-    for c in VS_COMPONENTS {
-        adds.push("--add".to_string());
-        adds.push(c.to_string());
-    }
-    let r = if let Some(vs) = any_vs() {
-        // Add the missing parts to the existing installation (asks for administrator rights).
+    let existing = any_vs();
+    let (setup, args) = if let Some(vs) = existing {
+        let build_tools = toolchain::visual_studio_installations(false, true).contains(&vs);
+        let setup = toolchain::visual_studio_installer();
+        if !setup.is_file() {
+            return Err("Visual Studio Installer is missing. Repair Visual Studio Installer from Microsoft's downloads page.".into());
+        }
         log(format!(
-            "Adding the C++ and Clang components to {}",
+            "Adding the C++ workload, Clang, CMake/Ninja and Windows SDK to {}",
             vs.display()
         ));
-        let pf =
-            std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
-        let setup = Path::new(&pf).join(r"Microsoft Visual Studio\Installer\setup.exe");
-        let mut args = vec![
-            "modify".to_string(),
-            "--installPath".into(),
-            util::path_str(&vs),
-        ];
-        args.extend(adds);
-        args.extend(["--includeRecommended", "--passive", "--norestart"].map(String::from));
-        let list = args
-            .iter()
-            .map(|a| format!("'{}'", a.replace('\'', "''")))
-            .collect::<Vec<_>>()
-            .join(",");
-        let ps = format!(
-            "$p = Start-Process -FilePath '{}' -ArgumentList {} -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
-            util::path_str(&setup).replace('\'', "''"),
-            list
+        (setup, vs_arguments(Some(&vs), build_tools))
+    } else {
+        let dir = std::env::temp_dir().join(format!("infamous-build-tools-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let setup = dir.join("vs_buildtools.exe");
+        log(
+            "Downloading the official Visual Studio 2022 Build Tools installer from Microsoft..."
+                .into(),
         );
+        let path = util::path_str(&setup).replace('\'', "''");
+        let ps=format!("$ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri 'https://aka.ms/vs/17/release/vs_buildtools.exe' -OutFile '{path}'; $signature=Get-AuthenticodeSignature -FilePath '{path}'; if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notlike '*Microsoft Corporation*') {{ throw 'The downloaded Visual Studio installer does not have a valid Microsoft signature.' }}");
         run_logged(
             Command::new("powershell").args([
                 "-NoProfile",
@@ -271,35 +322,27 @@ pub fn install_build_tools(log: &(dyn Fn(String) + Sync)) -> Result<(), String> 
                 &ps,
             ]),
             log,
-        )
-    } else if has_winget() {
-        let ov = format!(
-            "--wait --passive --norestart --includeRecommended {}",
-            adds.join(" ")
-        );
-        run_logged(
-            Command::new("winget").args([
-                "install",
-                "-e",
-                "--id",
-                "Microsoft.VisualStudio.2022.BuildTools",
-                "--accept-package-agreements",
-                "--accept-source-agreements",
-                "--disable-interactivity",
-                "--override",
-                &ov,
-            ]),
-            log,
-        )
-    } else {
-        Err("winget is not available. Install \"Build Tools for Visual Studio 2022\" from visualstudio.microsoft.com with \"Desktop development with C++\" and \"C++ Clang tools for Windows\".".into())
+        )?;
+        (setup, vs_arguments(None, true))
     };
+    log("Opening Microsoft Visual Studio Installer. Approve Windows' administrator prompt; the required components are selected automatically.".into());
+    let script = vs_elevated_script(&setup, &args);
+    let result = run_logged(
+        Command::new("powershell").args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ]),
+        log,
+    );
     refresh_path();
-    match (r, check_build_tools()) {
-        (_, Check::Ok(_)) => Ok(()),
-        (Err(e), _) => Err(format!("the Visual Studio installer did not finish ({e})")),
-        (Ok(()), Check::Missing(m)) => Err(m),
-        (Ok(()), c) => Err(format!("{c:?}")),
+    result.map_err(|e|format!("Visual Studio installation did not finish: {e}. See the details above; if another installer is open, finish or close it first."))?;
+    match check_build_tools() {
+        Check::Ok(_) => Ok(()),
+        Check::Missing(message) => Err(format!("The tools are not ready yet. If Microsoft requested a restart, restart Windows and reopen Setup.\n{message}")),
+        other => Err(format!("Build-tool verification did not finish: {other:?}")),
     }
 }
 
@@ -791,6 +834,55 @@ pub fn is_installed(dir: &Path) -> bool {
         && dir.join(".installer").join("state").is_file()
 }
 
+/// Prefer the installation beside a dropped-in Setup, then the working folder,
+/// then the usual first-install destination. No scan of unrelated drives.
+pub fn find_existing_install(exe: &Path, cwd: &Path, default: &Path) -> Option<PathBuf> {
+    for start in [exe.parent().unwrap_or(cwd), cwd] {
+        for dir in start.ancestors().take(3) {
+            if is_installed(dir) {
+                return Some(dir.to_path_buf());
+            }
+        }
+    }
+    is_installed(default).then(|| default.to_path_buf())
+}
+
+fn check_update_payload(source: &Source) -> Result<(), String> {
+    let names = match source {
+        Source::Embedded(exe) => payload::Payload::open(exe)
+            .map_err(|e| e.to_string())?
+            .ok_or("This Setup has no update files")?
+            .names()
+            .map_err(|e| e.to_string())?,
+        Source::Checkout { files, extra, .. } => files
+            .iter()
+            .cloned()
+            .chain(extra.iter().map(|(name, _)| name.clone()))
+            .collect(),
+    };
+    for name in names {
+        let lower = name.to_ascii_lowercase();
+        if lower.split('/').any(|part| {
+            matches!(
+                part,
+                ".git"
+                    | ".installer"
+                    | ".local"
+                    | "gamedata"
+                    | "savedata"
+                    | "ps3_game"
+                    | "settings.ini"
+            )
+        }) || lower.starts_with("infamous-recomp/assets/")
+        {
+            return Err(format!(
+                "Update package contains protected player data: {name}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct UpdateInfo {
     pub available: bool,
@@ -876,8 +968,12 @@ fn run_update(
         repaint();
     };
     let stopped = || cancel.load(Ordering::SeqCst);
+    if stopped() {
+        return Err("cancelled".into());
+    }
+    check_update_payload(source)?;
     remove_internal_documents(dir, &log);
-    set(0.005, "Repairing the launcher and updater", "");
+    set(0.005, "Applying files from this Setup", "");
     let placed = place_files(source, dir, &mut |done, total| {
         set(0.005 + 0.01 * done as f32 / total.max(1) as f32, "", "")
     })?;
@@ -894,15 +990,27 @@ fn run_update(
             dir.display()
         ));
     }
-    set(0.01, "Checking GitHub for a new version", "");
     let mut cmd = Command::new(&cli);
-    cmd.arg("update").arg("--root").arg(dir);
-    // See check_update: this deliberately migrates fork-configured and stale installations back
-    // to the repository selected by the Setup the player is currently running.
-    if let Some(repo) = update_repo {
-        cmd.arg("--repo").arg(repo);
+    if matches!(source, Source::Embedded(_)) {
+        // Reuse the installed EU game link or .installer/usa_game record. The
+        // install command skips completed generation/build work and never asks
+        // for the disc again while these existing files are available.
+        set(
+            0.02,
+            "Rebuilding the existing installation",
+            "Using installed game files; saves and settings are kept.",
+        );
+        cmd.arg("install").arg("--root").arg(dir).arg("-y");
+    } else {
+        set(0.01, "Checking GitHub for a new version", "");
+        cmd.arg("update").arg("--root").arg(dir);
+        // See check_update: this deliberately migrates fork-configured and stale installations back
+        // to the repository selected by the Setup the player is currently running.
+        if let Some(repo) = update_repo {
+            cmd.arg("--repo").arg(repo);
+        }
+        cmd.arg("--branch").arg(update_branch);
     }
-    cmd.arg("--branch").arg(update_branch);
     run_cli(cmd, dir, p, child, &stopped, &set, &log)?;
     if start_menu {
         add_update_shortcut(dir, game_title, &log);
@@ -1340,6 +1448,200 @@ pub fn open_url(u: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visual_studio_component_plan_matches_installed_product() {
+        let path = Path::new(r"C:\Custom Visual Studio\Community");
+        let ide = vs_arguments(Some(path), false);
+        assert_eq!(
+            &ide[..3],
+            &["modify", "--installPath", &util::path_str(path)]
+        );
+        assert!(ide
+            .iter()
+            .any(|a| a == "Microsoft.VisualStudio.Workload.NativeDesktop"));
+        assert!(!ide
+            .iter()
+            .any(|a| a == "Microsoft.VisualStudio.Workload.VCTools" || a == "--wait"));
+        let tools = vs_arguments(None, true);
+        assert!(tools.iter().any(|a| a == "--wait"));
+        assert!(tools
+            .iter()
+            .any(|a| a == "Microsoft.VisualStudio.Workload.VCTools"));
+        for component in VS_COMPONENTS {
+            assert!(ide.iter().any(|a| a == component));
+            assert!(tools.iter().any(|a| a == component));
+        }
+    }
+
+    #[test]
+    fn visual_studio_quoted_paths_and_success_codes_are_preserved() {
+        assert_eq!(
+            vs_command_line(&[r"C:\VS Space\".into()]),
+            "\"C:\\VS Space\\\\\""
+        );
+        let script = vs_elevated_script(
+            Path::new(r"C:\Jason's Tools\setup.exe"),
+            &vs_arguments(Some(Path::new(r"C:\Custom VS")), false),
+        );
+        assert!(script.contains("Jason''s Tools"));
+        assert!(script.contains("\"C:\\Custom VS\""));
+        for code in ["3010", "1641", "1001", "1223"] {
+            assert!(script.contains(code));
+        }
+        assert!(script.contains("-WindowStyle Normal") && script.contains("-Wait -PassThru"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn visual_studio_install_script_passes_powershell_parser_without_execution() {
+        let script = vs_elevated_script(
+            Path::new(r"C:\Installer's folder\setup.exe"),
+            &vs_arguments(Some(Path::new(r"C:\Custom VS")), false),
+        );
+        let parse=format!("$tokens=$null;$errors=$null;[void][System.Management.Automation.Language.Parser]::ParseInput('{}',[ref]$tokens,[ref]$errors); if($errors.Count){{ $errors | ForEach-Object {{ Write-Output $_.Message }};exit 1 }}",script.replace('\'',"''"));
+        assert!(
+            util::capture(Command::new("powershell").args(["-NoProfile", "-Command", &parse]))
+                .is_some()
+        );
+    }
+
+    fn update_fixture(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "infamous-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn dropped_setup_detects_custom_install_before_default() {
+        let root = update_fixture("discovery");
+        let custom = root.join("Custom game");
+        let default = root.join("Default game");
+        for dir in [&custom, &default] {
+            std::fs::create_dir_all(dir.join("installer")).unwrap();
+            std::fs::create_dir_all(dir.join(".installer")).unwrap();
+            std::fs::write(dir.join(".installer/state"), b"installed").unwrap();
+            std::fs::write(
+                dir.join(if cfg!(windows) {
+                    "installer/infamous-installer.exe"
+                } else {
+                    "installer/infamous-installer"
+                }),
+                b"fixture",
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            find_existing_install(&custom.join("inFamous Setup.exe"), &default, &default),
+            Some(custom.clone())
+        );
+        assert_eq!(
+            find_existing_install(
+                &custom.join("downloads/inFamous Setup.exe"),
+                &root,
+                &default
+            ),
+            Some(custom)
+        );
+        assert_eq!(
+            find_existing_install(&root.join("new.exe"), &root, &default),
+            Some(default)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn update_refuses_packages_containing_player_data() {
+        for name in [
+            "infamous-recomp/settings.ini",
+            "infamous-recomp/gamedata/save.dat",
+            ".installer/state",
+            "game/PS3_GAME/USRDIR/EBOOT.BIN",
+            "infamous-recomp/assets/xbox_icons.bin",
+        ] {
+            let source = Source::Checkout {
+                root: PathBuf::new(),
+                files: vec![name.into()],
+                extra: vec![],
+            };
+            assert!(check_update_payload(&source).is_err(), "{name}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Run with INFAMOUS_TEST_UPDATE_CLI pointing to the update CLI fixture"]
+    fn embedded_update_reuses_installation_and_preserves_player_data() {
+        let cli = PathBuf::from(
+            std::env::var_os("INFAMOUS_TEST_UPDATE_CLI").expect("fixture CLI required"),
+        );
+        let root = update_fixture("drop-in");
+        let dest = root.join("installed game");
+        std::fs::create_dir_all(dest.join(".installer")).unwrap();
+        std::fs::create_dir_all(dest.join("infamous-recomp/gamedata")).unwrap();
+        let kept = [
+            (".installer/state", b"existing build state".as_slice()),
+            (".installer/usa_game", b"existing game folder".as_slice()),
+            (
+                "infamous-recomp/settings.ini",
+                b"RES_SCALE=1280x800\nKBM_GLYPHS=1\n".as_slice(),
+            ),
+            (
+                "infamous-recomp/gamedata/save.dat",
+                b"player save".as_slice(),
+            ),
+            ("existing shortcut.lnk", b"shortcut".as_slice()),
+        ];
+        for (name, data) in kept {
+            std::fs::write(dest.join(name), data).unwrap();
+        }
+        let stub = root.join("stub");
+        let code = root.join("new-code");
+        let package = root.join("inFamous Setup.exe");
+        std::fs::write(&stub, b"fixture setup stub").unwrap();
+        std::fs::write(&code, b"updated source").unwrap();
+        payload::write(
+            &stub,
+            &[
+                ("installer/infamous-installer.exe".into(), cli),
+                ("infamous-recomp/main.cpp".into(), code),
+            ],
+            &package,
+        )
+        .unwrap();
+        run_update(
+            &dest,
+            "inFamous",
+            false,
+            &Source::Embedded(package),
+            Some("must/not-contact"),
+            "main",
+            &Arc::new(Mutex::new(Progress::default())),
+            &AtomicBool::new(false),
+            &Arc::new(Mutex::new(None)),
+            &|| {},
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(dest.join("infamous-recomp/main.cpp")).unwrap(),
+            b"updated source"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("update-command.txt")).unwrap(),
+            b"install --root -y"
+        );
+        for (name, data) in kept {
+            assert_eq!(std::fs::read(dest.join(name)).unwrap(), data, "{name}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn setup_resolution_creates_and_preserves_settings() {
