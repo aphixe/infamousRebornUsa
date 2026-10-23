@@ -466,6 +466,16 @@ add_executable(${PROJECT_NAME}
     ${SPU_SOURCES}
 )
 
+# SDL is loaded dynamically by the pad backend. Keep the matching x64 DLL next
+# to every Windows player built from this checkout, including fresh builds.
+if(WIN32 AND EXISTS "${PS3RECOMP_SDL3_DIR}/lib/x64/SDL3.dll")
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${PS3RECOMP_SDL3_DIR}/lib/x64/SDL3.dll"
+            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/SDL3.dll"
+        VERBATIM)
+endif()
+
 # The title-specific host glue used to be the last sizeable body of hot code
 # left at clang-cl's baseline x86-64 target.  In particular stubs.cpp contains
 # frequently-called HLE shims, while main.cpp owns the FIFO/vblank pump.  The

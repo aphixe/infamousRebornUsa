@@ -76,6 +76,16 @@ CELLS={0xF080:(61,162,52,52),0xF081:(114,162,52,52),0xF082:(167,162,52,52),0xF08
  0xF08A:(305,109,60,52),0xF08B:(366,109,60,52),0xF08C:(427,53,60,52),0xF08D:(0,162,60,52),0xF090:(273,162,52,52),
  0xF091:(326,162,52,52),0xF092:(379,162,52,52),0xF093:(432,106,52,52),0xF094:(432,159,52,52)}
 def build(vis_orig):
+    from pc_control_art import icon
+    names = ['C', 'F', 'E', 'SPACE', 'RMB', 'Q', 'LMB', 'R', 'ESC', 'TAB',
+             'WASD', 'V', 'MOVE', 'MMB', 'ARROWS', 'RIGHT', 'CTRL', 'LEFT', 'DOWN']
+    out=vis_orig.copy()
+    for name, (code,(x,y,w,h)) in zip(names, CELLS.items()):
+        out[y:y+h,x:x+w] = np.array(icon(name, (w,h)))
+    return out
+
+def build_legacy(vis_orig):
+    """Previous procedural art retained for comparison, not used by the builder."""
     out=vis_orig.copy()
     for code,(x,y,w,h) in CELLS.items():
         kind,arg=GL[code]

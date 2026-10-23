@@ -597,6 +597,18 @@ typedef struct {
 } D3D12State;
 
 static D3D12State s_d3d;
+#include "rsx_display_resolution.h"
+static u32 s_display_w, s_display_h;
+static ID3D12Resource* s_present_targets[FRAME_COUNT];
+/* Mouse coordinates must use the same content rectangle as the final copy. */
+void rsx_display_pointer(float* x, float* y)
+{
+    if (!s_display_w || !s_display_h) return;
+    unsigned cw, ch;
+    rsx_display_fit(s_display_w,s_display_h,s_d3d.width,s_d3d.height,&cw,&ch);
+    *x = (*x * s_display_w - (s_display_w-cw)/2u) / cw;
+    *y = (*y * s_display_h - (s_display_h-ch)/2u) / ch;
+}
 /* v154 RES_SCALE (default 1 = PS3 720p): internal resolution. Every render target / depth surface at the
  * guest display size (1280x720) is allocated at s_bbw x s_bbh instead, the swap chain too; viewports of
  * draws into them are scaled, fragment WPOS is scaled back to guest pixels (b1 rsx_wscale), and everything
@@ -615,7 +627,7 @@ static float s_out_scale = 1.0f;
 #define BBH (s_outh ? s_outh : RBH)
 static void res_scale_dims(u32* w, u32* h)
 {
-    if (s_res_scale > 1.0f && s_bbw && *w == s_d3d.width && *h == s_d3d.height) { *w = s_bbw; *h = s_bbh; }
+    if (s_res_scale != 1.0f && s_bbw && *w == s_d3d.width && *h == s_d3d.height) { *w = s_bbw; *h = s_bbh; }
 }
 #include "rsx_particle_resolution.h"
 static void particle_size(u32* w, u32* h)
@@ -1320,6 +1332,13 @@ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
          * without a mnemonic; Alt+Space (lp == ' ') and Alt+F4 (SC_CLOSE) still work. */
         if ((wp & 0xFFF0) == SC_KEYMENU && lp == 0) return 0;
         break;
+    case WM_SYSKEYDOWN:
+        /* Alt+Enter = the F11 borderless fullscreen toggle (DXGI's own Alt+Enter is off: MakeWindowAssociation). */
+        if (wp == VK_RETURN && !(lp & (1 << 30))) { PostMessageA(hwnd, WM_KEYDOWN, VK_F11, 0); return 0; }
+        break;
+    case WM_SYSCHAR:
+        if (wp == '\r') return 0;   /* no "invalid menu key" beep for Alt+Enter */
+        break;
     case WM_KEYDOWN:
         /* v155: Esc no longer closes the game (cellPad maps it to Start = pause menu); close with the
          * window's X. ESC_QUITS=1 restores the old behaviour. F1 = borderless fullscreen <-> window. */
@@ -1366,8 +1385,14 @@ static HWND create_window(u32 width, u32 height, const char* title)
     wc.lpszClassName = "ps3recomp_d3d12";
     RegisterClassExA(&wc);
 
+    {   /* local-4k: per-monitor DPI aware, so a RES_SCALE 3 frame reaches a 4K screen 1:1 instead of being
+         * scaled to the desktop's logical size and stretched back up by DWM. (Before any window exists.) */
+        typedef BOOL (WINAPI *set_ctx_fn)(HANDLE);
+        set_ctx_fn set_ctx = (set_ctx_fn)GetProcAddress(GetModuleHandleA("user32.dll"), "SetProcessDpiAwarenessContext");
+        if (set_ctx) set_ctx((HANDLE)(intptr_t)-4);   /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 */
+    }
+    RECT wa = {0, 0, 0, 0};
     {   /* v154: a window larger than the screen's work area is shrunk (same aspect); DXGI scales the image */
-        RECT wa;
         if (SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0)) {
             const double mw = (double)(wa.right - wa.left) * 0.95, mh = (double)(wa.bottom - wa.top) * 0.90;
             if (mw > 64 && mh > 64 && ((double)width > mw || (double)height > mh)) {
@@ -1378,6 +1403,14 @@ static HWND create_window(u32 width, u32 height, const char* title)
     }
     RECT wr = {0, 0, (LONG)width, (LONG)height};
     AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
+    /* local-4k: centred on the main screen's work area (the default position can land half off-screen) */
+    int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+    if (wa.right > wa.left && wa.bottom > wa.top) {
+        x = wa.left + ((wa.right - wa.left) - (wr.right - wr.left)) / 2;
+        y = wa.top + ((wa.bottom - wa.top) - (wr.bottom - wr.top)) / 2;
+        if (x < wa.left) x = wa.left;
+        if (y < wa.top) y = wa.top;
+    }
 
     /* Keep the display awake (see rsx_null_backend.c). */
     SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
@@ -1385,7 +1418,7 @@ static HWND create_window(u32 width, u32 height, const char* title)
         0, "ps3recomp_d3d12",
         title ? title : "ps3recomp (D3D12)",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        CW_USEDEFAULT, CW_USEDEFAULT,
+        x, y,
         wr.right - wr.left, wr.bottom - wr.top,
         NULL, NULL, GetModuleHandle(NULL), NULL);
 }
@@ -1520,8 +1553,8 @@ static int init_d3d12(u32 width, u32 height)
 
     /* Create swap chain */
     DXGI_SWAP_CHAIN_DESC1 sc_desc = {0};
-    sc_desc.Width = BBW;     /* v154 */
-    sc_desc.Height = BBH;
+    sc_desc.Width = s_display_w ? s_display_w : BBW;
+    sc_desc.Height = s_display_h ? s_display_h : BBH;
     sc_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     sc_desc.SampleDesc.Count = 1;
     sc_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -1571,7 +1604,7 @@ static int init_d3d12(u32 width, u32 height)
 #endif
     /* Create RTV descriptor heap */
     D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc = {0};
-    rtv_heap_desc.NumDescriptors = FRAME_COUNT;
+    rtv_heap_desc.NumDescriptors = FRAME_COUNT * 2;
     rtv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     hr = s_d3d.device->lpVtbl->CreateDescriptorHeap(
         s_d3d.device, &rtv_heap_desc, &IID_ID3D12DescriptorHeap, (void**)&s_d3d.rtv_heap);
@@ -1588,6 +1621,22 @@ static int init_d3d12(u32 width, u32 height)
         hr = s_d3d.swap_chain->lpVtbl->GetBuffer(
             s_d3d.swap_chain, i, &IID_ID3D12Resource, (void**)&s_d3d.render_targets[i]);
         if (FAILED(hr)) return -1;
+
+        if (s_display_w && (s_display_w != BBW || s_display_h != BBH)) {
+            s_present_targets[i] = s_d3d.render_targets[i];
+            D3D12_RESOURCE_DESC td = {0};
+            td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            td.Width = BBW; td.Height = BBH; td.DepthOrArraySize = 1; td.MipLevels = 1;
+            td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+            td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+            hr = s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device,&hp,D3D12_HEAP_FLAG_NONE,
+                    &td,D3D12_RESOURCE_STATE_PRESENT,NULL,&IID_ID3D12Resource,(void**)&s_d3d.render_targets[i]);
+            if (FAILED(hr)) return -1;
+            D3D12_CPU_DESCRIPTOR_HANDLE output = rtv_handle;
+            output.ptr += FRAME_COUNT * s_d3d.rtv_descriptor_size;
+            s_d3d.device->lpVtbl->CreateRenderTargetView(s_d3d.device,s_present_targets[i],NULL,output);
+        }
 
         s_d3d.device->lpVtbl->CreateRenderTargetView(
             s_d3d.device, s_d3d.render_targets[i], NULL, rtv_handle);
@@ -4602,7 +4651,7 @@ static ID3D12PipelineState* vp_get_fp_pso_impl(int vs_idx, u32 fp_addr, u32 blen
                     memmove(cb + newlen, ce, tail);
                     memcpy(cb, decl, newlen);
                     /* v154 RES_SCALE: WPOS in guest pixels ("input .position" so the scan does not re-match) */
-                    if (s_res_scale > 1.0f) hlsl_replace_all(hlsl, sizeof hlsl, "input.position", "(input .position * rsx_wscale)");
+                    if (s_res_scale != 1.0f) hlsl_replace_all(hlsl, sizeof hlsl, "input.position", "(input .position * rsx_wscale)");
                 } else n = -1;
             } else n = -1;
             { static int _n = 0; if ((_n < 3 && _n++ < 3))
@@ -5529,14 +5578,17 @@ static int tex_mips_on(void)
  * KBM_GLYPHS=0 never, 1 auto (default), 2 always KBM.
  * =========================================================================*/
 extern volatile int g_input_kbm;   /* cellPad.c: 1 keyboard/mouse, 0 controller, -1 not known yet */
+extern volatile int g_input_controller_xbox;
+#include "../input/pad_prompt_mode.h"
 static int s_kg_state = 0, s_kg_cfg = -1;
 /* v197: a table -- the prompt-font atlas (kbm_icons.bin, v193) + the HUD button-prompt textures
  * (kbm_prompts.bin: "IFKBMIC2", u32 n, n x {w, h, fmt, nb, csum, orig L0, KBM L0}; tools/make_kbm_prompts.py) */
-typedef struct { u32 w, h, fmt, nb, csum; u8 *orig, *kbm; } KgEnt;
+typedef struct { u32 w, h, fmt, nb, csum; u8 *orig, *kbm, *xbox; } KgEnt;
 #define KG_MAX 32
 static KgEnt s_kg[KG_MAX]; static int s_kg_n = 0;
 #define KG_CSUM_KBM 0x4B424D31u
-static int kg_add(FILE* f, const u32 h[5])
+#define KG_CSUM_XBOX 0x58424F58u
+static int kg_add(FILE* f, const u32 h[5], int xbox)
 {
     if (s_kg_n >= KG_MAX || !h[3] || h[3] > (4u << 20)) return 0;
     KgEnt* e = &s_kg[s_kg_n];
@@ -5544,19 +5596,30 @@ static int kg_add(FILE* f, const u32 h[5])
     e->orig = (u8*)malloc(e->nb); e->kbm = (u8*)malloc(e->nb);
     if (!e->orig || !e->kbm || fread(e->orig, 1, e->nb, f) != e->nb || fread(e->kbm, 1, e->nb, f) != e->nb) {
         free(e->orig); free(e->kbm); return 0; }
+    if (xbox) {
+        for (int i = 0; i < s_kg_n; i++) {
+            KgEnt* original = &s_kg[i];
+            if (original->w == e->w && original->h == e->h && original->fmt == e->fmt &&
+                original->nb == e->nb && original->csum == e->csum && !memcmp(original->orig,e->orig,e->nb)) {
+                free(original->xbox); original->xbox = e->kbm;
+                free(e->orig); memset(e,0,sizeof *e); return 1;
+            }
+        }
+        free(e->orig); free(e->kbm); memset(e,0,sizeof *e); return 0;
+    }
     s_kg_n++; return 1;
 }
-static int kg_try(const char* path)
+static int kg_try(const char* path, int xbox)
 {
     FILE* f = fopen(path, "rb"); if (!f) return 0;
     char m[8]; u32 h[5]; int got = 0;
     if (fread(m, 1, 8, f) == 8) {
-        if (!memcmp(m, "IFKBMIC1", 8)) { if (fread(h, 4, 5, f) == 5) got += kg_add(f, h); }
+        if (!memcmp(m, "IFKBMIC1", 8)) { if (fread(h, 4, 5, f) == 5) got += kg_add(f, h, xbox); }
         else if (!memcmp(m, "IFKBMIC2", 8)) { u32 n = 0;
-            if (fread(&n, 4, 1, f) == 1) for (u32 i = 0; i < n && i < KG_MAX; i++) { if (fread(h, 4, 5, f) != 5 || !kg_add(f, h)) break; got++; } }
+            if (fread(&n, 4, 1, f) == 1) for (u32 i = 0; i < n && i < KG_MAX; i++) { if (fread(h, 4, 5, f) != 5 || !kg_add(f, h, xbox)) break; got++; } }
     }
     fclose(f);
-    if (got) fprintf(stderr, "[KBMGLYPH] v197 keyboard/mouse prompt textures loaded: %s (%d textures; KBM_GLYPHS=%d)%c", path, got, s_kg_cfg, 10);
+    if (got) fprintf(stderr, "[KBMGLYPH] %s prompt textures loaded: %s (%d textures; KBM_GLYPHS=%d)%c", xbox ? "Xbox" : "keyboard/mouse", path, got, s_kg_cfg, 10);
     return got;
 }
 static int kg_ready(void)
@@ -5569,11 +5632,11 @@ static int kg_ready(void)
     if (n && n < MAX_PATH) {
         char* sl = strrchr(exe, '\\'); if (sl) *sl = 0;
         static const char* rel[] = { "\\assets\\", "\\..\\assets\\", "\\..\\..\\assets\\" };
-        static const char* fn[] = { "kbm_icons.bin", "kbm_prompts.bin" };
-        for (int k = 0; k < 2; k++)
+        static const char* fn[] = { "kbm_icons.bin", "kbm_prompts.bin", "xbox_icons.bin", "xbox_prompts.bin" };
+        for (int k = 0; k < 4; k++)
             for (int i = 0; i < 3; i++) {
                 char p2[MAX_PATH + 64]; snprintf(p2, sizeof p2, "%s%s%s", exe, rel[i], fn[k]);
-                if (kg_try(p2)) break;
+                if (kg_try(p2, k >= 2)) break;
             }
     }
     if (s_kg_n) { s_kg_state = 1; return 1; }
@@ -5581,10 +5644,10 @@ static int kg_ready(void)
     return 0;
 }
 extern volatile int g_ui_kbm_glyphs;   /* v194 settings menu: -1 env, 0 controller, 1 auto, 2 keyboard/mouse */
-static inline int kg_want_kbm(void)
+static inline int kg_prompt_mode(void)
 {
     const int c = g_ui_kbm_glyphs >= 0 ? g_ui_kbm_glyphs : s_kg_cfg;
-    return c == 2 || (c != 0 && g_input_kbm > 0);
+    return pad_prompt_mode(c, g_input_kbm, g_input_controller_xbox);
 }
 /* one of the replaced textures (by size/format/checksum of the guest bytes); 0 = none, else index + 1 */
 static inline int kg_hit(u32 w, u32 h, u32 basef, int cube, u32 cs)
@@ -5884,7 +5947,7 @@ static void tex_decode_d(void* dst, u32 dst_pitch, const u8* src, u32 w, u32 h, 
 }
 static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips)
 {
-    const int _kg_k = kg_want_kbm();   /* v193: one read per call (bind check and stored checksum agree) */
+    const int _kg_k = kg_prompt_mode();   /* one read: bind check and stored checksum agree */
     /* TEX_BUDGET=<n>: cap texture uploads per frame. Off by default -- it was
      * tried against the TDR and does not help, because PERF shows the upload
      * path costing 0.01s for 775 calls. Kept because it is the right lever if a
@@ -5993,7 +6056,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
             if (!tcs_take(i, c->off, nb, face_stride, basef == 0x81, &cs))   /* v228 TEXCS: precomputed this frame? */
                 cs = (basef == 0x81) ? tex_csum_dense(vm_base + c->off, nb)
                                      : tex_csum_faces(vm_base + c->off, nb, face_stride);
-            if (_kg_k && kg_hit(w, h, basef, cube, cs)) cs ^= KG_CSUM_KBM;   /* v193: KBM icons are a different image */
+            if (_kg_k && kg_hit(w, h, basef, cube, cs)) cs ^= _kg_k == 2 ? KG_CSUM_XBOX : KG_CSUM_KBM;
             if (cs == c->csum) { c->used = 1; c->lru = s_tex_frame; tex_assoc_note(hh, i, assoc); return i; }
             slot = i; break;                      /* stale: fall through and redo */
         }
@@ -6168,8 +6231,8 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
         const u32 _nb = blkrow * blkrows;
         const int _e = kg_hit(w, h, basef, cube, tex_csum_faces(vm_base + off, _nb, 0)) - 1;
         if (_e >= 0 && s_kg[_e].nb == _nb && memcmp(vm_base + off, s_kg[_e].orig, _nb) == 0) {
-            _kg_src = s_kg[_e].kbm;
-            static int _n = 0; if (_n < 16) { _n++; fprintf(stderr, "[KBMGLYPH] prompt texture %d (%ux%u) -> keyboard/mouse (tex 0x%08X)%c", _e, w, h, off, 10); }
+            _kg_src = _kg_k == 2 ? s_kg[_e].xbox : s_kg[_e].kbm;
+            static int _n = 0; if (_n < 16) { _n++; fprintf(stderr, "[KBMGLYPH] prompt texture %d (%ux%u) -> %s (tex 0x%08X)%c", _e, w, h, _kg_k == 2 ? "Xbox" : "keyboard/mouse", off, 10); }
         }
     }
     { static int _was = -1; if (!_kg_k && _was == 1 && w == 512u && h == 256u && basef == 0x88u) {
@@ -6694,7 +6757,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
     { u32 nb = dxt ? (blkrow * blkrows) : (w * h * bpp);
       t->csum = ((fmt & 0x9F) == 0x81) ? tex_csum_dense(vm_base + off, nb)
                                        : tex_csum_faces(vm_base + off, nb, face_stride);
-      if (_kg_k && kg_hit(w, h, basef, cube, t->csum)) t->csum ^= KG_CSUM_KBM; }   /* v193: same rule as the bind check */
+      if (_kg_k && kg_hit(w, h, basef, cube, t->csum)) t->csum ^= _kg_k == 2 ? KG_CSUM_XBOX : KG_CSUM_KBM; }
     #undef TEX_CSUM
     return slot;
 }
@@ -7250,7 +7313,7 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
         }
         {   /* v154 rsx_wscale (b1[70]): fragment WPOS -> guest pixels on a RES_SCALE target */
             float wx = 1.0f, wy = 1.0f;
-            if (dr && s_res_scale > 1.0f) {
+            if (dr && s_res_scale != 1.0f) {
                 u32 gw0 = dr->rt_off ? dr->rt_w : s_d3d.width, gh0 = dr->rt_off ? dr->rt_h : s_d3d.height;
                 if (!gw0 || !gh0) { gw0 = s_d3d.width; gh0 = s_d3d.height; }
                 u32 pw = gw0, ph = gh0; particle_size(&pw, &ph);
@@ -11110,6 +11173,41 @@ skip_dump_consider: ;
         }
     }
 
+    /* Copy the completed 16:9 image into the selected output canvas. Keeping
+     * this after all game/UI draws preserves their UVs, projection and sizes. */
+    if (s_present_targets[fi]) {
+        D3D12_RESOURCE_BARRIER pb = {0};
+        pb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        pb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        pb.Transition.pResource = s_present_targets[fi];
+        pb.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        pb.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list,1,&pb);
+        D3D12_CPU_DESCRIPTOR_HANDLE output;
+        RSX_D3D12_CPU_HEAP_START(s_d3d.rtv_heap)(s_d3d.rtv_heap,&output);
+        output.ptr += (FRAME_COUNT + fi) * s_d3d.rtv_descriptor_size;
+        const float black[4] = {0,0,0,1};
+        s_d3d.cmd_list->lpVtbl->ClearRenderTargetView(s_d3d.cmd_list,output,black,0,NULL);
+        pb.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        pb.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list,1,&pb);
+        D3D12_RESOURCE_BARRIER cb = pb;
+        cb.Transition.pResource = s_d3d.render_targets[fi];
+        cb.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        cb.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list,1,&cb);
+        D3D12_TEXTURE_COPY_LOCATION dst = {0}, src = {0};
+        dst.pResource = s_present_targets[fi]; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.pResource = s_d3d.render_targets[fi]; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list,&dst,
+                (s_display_w-BBW)/2u,(s_display_h-BBH)/2u,0,&src,NULL);
+        pb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        pb.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+        cb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        cb.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+        s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list,1,&pb);
+        s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list,1,&cb);
+    }
     /* Close and execute */
     rft_mark(RFT_TAIL1);
     gq_frame_end();   /* v199 GPUPROF */
@@ -11271,11 +11369,12 @@ skip_dump_consider: ;
          * of the same lists has not). Telling the cull our real resolution restores them. Logs [CULLVP]. */
         static int cv = -1, f8_was = 0, logged = 0; extern uint8_t* vm_base;
         if (cv < 0) { const char* e = getenv("CULL_VP_SCALE"); cv = (e && *e == '0') ? 0 : 1;
-            fprintf(stderr, "[CULLVP] v175 SPU cull viewport scaling %s (RES_SCALE %.0f; F8 toggles)%c", cv ? "ON" : "off", s_res_scale, 10); }
-        const int f8 = s_d3d.hwnd && GetForegroundWindow() == s_d3d.hwnd && (GetAsyncKeyState(VK_F8) & 0x8000);
+            fprintf(stderr, "[CULLVP] v175 SPU cull viewport scaling %s (RES_SCALE %.0f)%c", cv ? "ON" : "off", s_res_scale, 10); }
+        /* local-4k: F8 is the mouse release key (cellPad.c); CULL_VP_SCALE stays as set at start */
+        const int f8 = 0;
         if (f8 && !f8_was) { cv = !cv; fprintf(stderr, "[CULLVP] F8 -> %s%c", cv ? "ON (cull at render resolution)" : "off (cull at 720p, game default)", 10); }
         f8_was = f8;
-        if (vm_base && s_res_scale > 1.0f) {
+        if (vm_base && s_res_scale != 1.0f) {
             uint8_t* b = vm_base + 0x008E40F8u;
             const float k = cv ? s_res_scale : 1.0f;
             const u32 w1 = 1280u, h1 = 720u;
@@ -11347,7 +11446,9 @@ skip_dump_consider: ;
             bs_last = bs_now;
             if (GetFileAttributesA(bs_req) != INVALID_FILE_ATTRIBUTES) {
                 DeleteFileA(bs_bmp);
-                cap_readback_write(s_d3d.render_targets[fi], BBW, BBH, DXGI_FORMAT_R8G8B8A8_UNORM,
+                cap_readback_write(s_present_targets[fi] ? s_present_targets[fi] : s_d3d.render_targets[fi],
+                                   s_present_targets[fi] ? s_display_w : BBW,
+                                   s_present_targets[fi] ? s_display_h : BBH, DXGI_FORMAT_R8G8B8A8_UNORM,
                                    D3D12_RESOURCE_STATE_PRESENT, fi, bs_bmp);
                 DeleteFileA(bs_req);
                 fprintf(stderr, "[BENCH] shot frame %llu (%u draws) -> %s%c", (unsigned long long)s_d3d.frame_count,
@@ -15807,6 +15908,12 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
         s_bbw = ((u32)((float)width * sc + 0.5f) + 1u) & ~1u;
         s_bbh = ((u32)((float)height * sc + 0.5f) + 1u) & ~1u;
         if (sc <= 1.0f) { s_bbw = width; s_bbh = height; }
+        s_display_w = s_display_h = 0;
+        if (rsx_display_resolution(e,&s_display_w,&s_display_h)) {
+            rsx_display_fit(s_display_w,s_display_h,width,height,&s_bbw,&s_bbh);
+            sc = (float)s_bbw / width; s_res_scale = sc;
+            fprintf(stderr,"[RES] output %ux%u, aspect-preserved content %ux%u\n",s_display_w,s_display_h,s_bbw,s_bbh);
+        }
         fprintf(stderr, "[RES] v154 internal resolution %ux%u (RES_SCALE %.2f, guest %ux%u)%c", s_bbw, s_bbh, sc, width, height, 10);
 #ifdef PS3RECOMP_DLSS
         {   /* DLSS upscaling (DLSS_MODE quality / balanced / performance): the game renders at the mode's share of that
@@ -15848,7 +15955,7 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
         snprintf(g_rsx_title_base, sizeof(g_rsx_title_base), "%s",
                  title ? title : "ps3recomp");
     }
-    s_d3d.hwnd = create_window(BBW, BBH, title);   /* v154: window at the internal resolution (clamped to the screen) */
+    s_d3d.hwnd = create_window(s_display_w ? s_display_w : BBW, s_display_h ? s_display_h : BBH, title);
     {   /* v153: raw mouse input for mouse-look (PAD_RAWINPUT=0 = cursor deltas as before) */
         const char* e = getenv("PAD_RAWINPUT");
         if (s_d3d.hwnd && !(e && e[0] == '0')) {
@@ -15921,6 +16028,7 @@ void rsx_d3d12_backend_shutdown(void)
     for (u32 i = 0; i < FRAME_COUNT; i++) {
         if (s_d3d.cmd_allocators[i]) s_d3d.cmd_allocators[i]->lpVtbl->Release(s_d3d.cmd_allocators[i]);
         if (s_d3d.render_targets[i]) s_d3d.render_targets[i]->lpVtbl->Release(s_d3d.render_targets[i]);
+        if (s_present_targets[i]) { s_present_targets[i]->lpVtbl->Release(s_present_targets[i]); s_present_targets[i] = NULL; }
     }
     if (s_d3d.rtv_heap) s_d3d.rtv_heap->lpVtbl->Release(s_d3d.rtv_heap);
     if (s_d3d.swap_chain) s_d3d.swap_chain->lpVtbl->Release(s_d3d.swap_chain);

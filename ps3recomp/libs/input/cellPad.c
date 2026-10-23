@@ -183,6 +183,12 @@ static int pad_envi(const char* n, int d);
 /* v193: which device the player used last -- read by the renderer to show keyboard/mouse or controller button
  * prompts (rsx_d3d12_backend.c KBM GLYPHS). 1 = keyboard/mouse, 0 = controller, -1 = nothing yet. */
 volatile int g_input_kbm = -1;
+volatile int g_input_controller_xbox = 0;
+void ps3_pad_note_controller(int xbox)
+{
+    g_input_controller_xbox = xbox;
+    g_input_kbm = 0;
+}
 static void pad_note_device(int kbm)
 {
     if (g_input_kbm != kbm) {
@@ -433,6 +439,16 @@ static void pad_poll_kbm(int merge)
         extern volatile int g_uiov_menu_open;   /* v194: Esc belongs to the settings menu while it is open */
         if (esc && !s_esc_prev && !g_uiov_menu_open) s_menu_free = !s_menu_free;
         s_esc_prev = esc;
+        /* local-4k: F8 = release / recapture the mouse without pausing (the same free-pointer mode) */
+        static volatile LONG s_f8_down = 0;   /* polled from more than one thread: one toggle per press */
+        if (KD(VK_F8)) {
+            if (!InterlockedExchange(&s_f8_down, 1) && !g_uiov_menu_open && pad_host_window_focused()) {
+                s_menu_free = !s_menu_free;
+                printf("[mouse] F8: mouse %s\n", s_menu_free ? "released" : "captured");
+            }
+        } else {
+            InterlockedExchange(&s_f8_down, 0);
+        }
         if (s_menu_free && KD(VK_LBUTTON)) {
             HWND fw = GetForegroundWindow(); POINT cp; RECT cr;
             if (fw && GetCursorPos(&cp) && ScreenToClient(fw, &cp) && GetClientRect(fw, &cr) &&
@@ -550,6 +566,12 @@ static void pad_poll_kbm(int merge)
         }
     }
     if (!have_mouse) { g_pad_mouse_captured = 0; s_mx = s_my = 0.0f; }
+    {   /* local-4k: hide / show the pointer as soon as capture changes (F8, Esc), not on the next mouse move */
+        static volatile LONG s_cap_shown = -1;
+        const LONG cap = g_pad_mouse_captured ? 1 : 0;
+        if (InterlockedExchange(&s_cap_shown, cap) != cap && fg)
+            PostMessageA(fg, WM_SETCURSOR, (WPARAM)fg, MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+    }
     float rx = 0.0f, ry = 0.0f;
     if (s_mx > 0.5f || s_mx < -0.5f) rx = (s_mx > 0 ? 1.0f : -1.0f) * (float)s_dz + s_mx;
     if (s_my > 0.5f || s_my < -0.5f) ry = (s_my > 0 ? 1.0f : -1.0f) * (float)s_dz + s_my;
@@ -725,8 +747,7 @@ static void pad_poll_xinput(void)
         /* v193: controller activity -> controller prompts (sticks past ~37 %, so drift does not flip it) */
         { const int st = (gp->sThumbLX > 12000 || gp->sThumbLX < -12000 || gp->sThumbLY > 12000 || gp->sThumbLY < -12000 ||
                           gp->sThumbRX > 12000 || gp->sThumbRX < -12000 || gp->sThumbRY > 12000 || gp->sThumbRY < -12000);
-          if (btns || st) pad_note_device(0);
-          else if (g_input_kbm < 0) pad_note_device(0); }
+          if (i == 0 && (btns || st || g_input_kbm < 0)) ps3_pad_note_controller(1); }
 
         /* Analog sticks. PS3 Y axis is inverted vs XInput (up = 0). Reflect about
          * 128 (256 - x), NOT 255 - x: the latter turns a centered stick into 127,
@@ -792,8 +813,7 @@ static void pad_merge_sdl3(void)
         h->press_l1 = (b & CELL_PAD_CTRL_L1) ? 255 : 0;             h->press_r1 = (b & CELL_PAD_CTRL_R1) ? 255 : 0;
         /* controller activity -> controller prompts (sticks past ~37 %, like the XInput path) */
         const int moved = p->lx < 80 || p->lx > 176 || p->ly < 80 || p->ly > 176 || p->rx < 80 || p->rx > 176 || p->ry < 80 || p->ry > 176;
-        if (b || moved) pad_note_device(0);
-        else if (g_input_kbm < 0) pad_note_device(0);
+        if (i == 0 && (b || moved || g_input_kbm < 0)) ps3_pad_note_controller(p->xbox_glyphs);
         s_sdl_slot[i] = k++;
     }
 }

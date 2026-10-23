@@ -10,6 +10,7 @@ usage: python make_kbm_prompts.py <core.xpp> <out.bin>"""
 import sys, struct, numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from kbm_glyphs_dxt import dxt5_decode, dxt5_encode, tex_csum
+from pc_control_art import icon
 FONT = (lambda os: next((p for p in (                     # KBM_FONT overrides; Windows falls back to Arial Bold
     os.environ.get('KBM_FONT'),
     '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
@@ -90,22 +91,43 @@ def label(img, txt):
     dr.rounded_rectangle([x0, y0, x1, y1], radius=S*2, fill=face)
     put_text(dr, (x0 - S, y0 - S*0.5, x1 + S, y1 + S*0.5), txt, (255, 255, 255, 255), 0.95, wfrac=1.0)
     return np.array(big.resize((W, H), Image.LANCZOS))
-JOBS = [  # (oid, kind, text)
-    (112262, round_button, 'E'), (104863, round_button, 'C'), (109235, round_button, 'F'), (114719, round_button, ' '),
-    (112638, symbol, 'E'), (105340, symbol, 'C'), (109491, symbol, 'F'), (101272, symbol, ' '),
-    (105741, label, 'RMB'), (109557, label, 'LMB'), (111504, label, 'Q'),
-]
+# OIDs are release-specific. Validate a complete region before writing output;
+# USA 109235, for example, is an unrelated 64x64 texture, not the EU square.
+REGIONS = {
+    'EU': [112262, 104863, 109235, 114719, 112638, 105340, 109491, 101272, 105741, 109557, 111504],
+    'USA': [111258, 103276, 107621, 114074, 110278, 102102, 105987, 112883, 103981, 108352, 112381],
+}
+NAMES = ['E', 'C', 'F', 'SPACE', 'E', 'C', 'F', 'SPACE', 'RMB', 'LMB', 'Q']
+for region, ids in REGIONS.items():
+    try:
+        textures = [tex(oid) for oid in ids]
+        if any((w,h) != ((32,32) if i < 8 else (32,16)) for i,(w,h,raw) in enumerate(textures)):
+            continue
+        break
+    except SystemExit:
+        continue
+else:
+    raise SystemExit('No complete supported EU/USA HUD prompt set found in core.xpp')
+print('HUD prompt region:', region)
 out = b''; prev = []
-for oid, fn, t in JOBS:
-    w, h, raw = tex(oid)
+for name, (w, h, raw) in zip(NAMES, textures):
     vis = dxt5_decode(raw, w, h)[::-1]                    # stored bottom-up
-    new = fn(vis.copy(), t)
+    new = np.array(icon(name, (w,h)))
     enc = dxt5_encode(np.ascontiguousarray(new[::-1]))
     assert len(enc) == len(raw)
     out += struct.pack('<5I', w, h, 0x88, len(raw), tex_csum(raw, len(raw))) + raw + enc
     prev.append((vis, dxt5_decode(enc, w, h)[::-1]))
-open(sys.argv[2], 'wb').write(b'IFKBMIC2' + struct.pack('<I', len(JOBS)) + out)
-print('wrote', sys.argv[2], len(JOBS), 'textures')
+open(sys.argv[2], 'wb').write(b'IFKBMIC2' + struct.pack('<I', len(NAMES)) + out)
+print('wrote', sys.argv[2], len(NAMES), 'textures')
+from pathlib import Path
+from xbox_glyphs import icon as xbox_icon
+xbout = b''
+for i, (w,h,raw) in enumerate(textures):
+    name = ['Y','B','X','A','Y','B','X','A','LB','RB','LT'][i]
+    art = np.array(xbox_icon(name,(w,h),symbol=4 <= i < 8))
+    encoded = dxt5_encode(np.ascontiguousarray(art[::-1]))
+    xbout += struct.pack('<5I',w,h,0x88,len(raw),tex_csum(raw,len(raw))) + raw + encoded
+Path(sys.argv[2]).with_name('xbox_prompts.bin').write_bytes(b'IFKBMIC2'+struct.pack('<I',len(textures))+xbout)
 if len(sys.argv) > 3:   # preview: originals on top, KBM below, 6x, on mid grey
     Z = 6; tiles = []
     for a, b in prev:

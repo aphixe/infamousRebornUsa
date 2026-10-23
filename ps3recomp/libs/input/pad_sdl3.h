@@ -23,6 +23,7 @@ extern "C" {
 
 typedef struct PadSdlPad {
     int      connected;
+    int      xbox_glyphs;          /* Xbox/Steam layout; Sony keeps original PS glyphs */
     uint16_t buttons;              /* CELL_PAD_CTRL_* */
     uint8_t  lx, ly, rx, ry;       /* 0..255, centre 128, up = 0 */
     uint8_t  l2, r2;               /* 0..255 */

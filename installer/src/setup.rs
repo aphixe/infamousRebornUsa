@@ -602,6 +602,74 @@ pub struct InstallOpts {
     pub start_menu: bool,
     pub game_title: String,
     pub link_name: String,
+    pub resolution_scale: String,
+}
+
+/// Choices supported by the game's RES_SCALE renderer setting.
+pub const RESOLUTIONS: &[(&str, &str)] = &[
+    ("1280x720", "1280 x 720 (720p)"),
+    ("1920x1080", "1920 x 1080 (1080p)"),
+    ("2560x1440", "2560 x 1440 (1440p)"),
+    ("3200x1800", "3200 x 1800 (1800p)"),
+    ("3840x2160", "3840 x 2160 (4K)"),
+    ("1024x768", "1024 x 768 (4:3)"),
+    ("1280x960", "1280 x 960 (4:3)"),
+    ("1280x1024", "1280 x 1024 (5:4)"),
+    ("1366x768", "1366 x 768"),
+    ("1600x900", "1600 x 900"),
+    ("1600x1200", "1600 x 1200 (4:3)"),
+    ("1680x1050", "1680 x 1050 (16:10)"),
+    ("1920x1200", "1920 x 1200 (16:10)"),
+    ("2560x1080", "2560 x 1080 (ultrawide)"),
+    ("2560x1600", "2560 x 1600 (16:10)"),
+    ("3440x1440", "3440 x 1440 (ultrawide)"),
+    ("1280x800", "1280 x 800 (Steam Deck)"),
+];
+
+pub fn resolution_index(value: &str) -> Option<usize> {
+    RESOLUTIONS
+        .iter()
+        .position(|(v, _)| *v == value.trim())
+        .or_else(|| {
+            let scale: f64 = value.trim().parse().ok()?;
+            [1.0_f64, 1.5, 2.0, 2.5, 3.0]
+                .iter()
+                .position(|v| (v - scale).abs() < 0.01)
+        })
+}
+
+pub fn installed_resolution(root: &Path) -> Option<usize> {
+    let text = std::fs::read_to_string(root.join("infamous-recomp/settings.ini")).ok()?;
+    text.lines()
+        .filter_map(|line| line.split_once('='))
+        .filter(|(key, _)| key.trim() == "RES_SCALE")
+        .filter_map(|(_, value)| resolution_index(value))
+        .last()
+}
+
+fn save_resolution(root: &Path, scale: &str) -> Result<(), String> {
+    let index =
+        resolution_index(scale).ok_or_else(|| format!("Unsupported resolution: {scale}"))?;
+    let scale = RESOLUTIONS[index].0;
+    let path = root.join("infamous-recomp/settings.ini");
+    let old = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("Could not read {}: {e}", path.display())),
+    };
+    let mut lines: Vec<String> = old
+        .lines()
+        .filter(|line| {
+            !line
+                .split_once('=')
+                .map(|(key, _)| key.trim() == "RES_SCALE")
+                .unwrap_or(false)
+        })
+        .map(str::to_owned)
+        .collect();
+    lines.push(format!("RES_SCALE={scale}"));
+    util::write_file(&path, (lines.join("\n") + "\n").as_bytes())
+        .map_err(|e| format!("Could not save resolution: {e}"))
 }
 
 #[derive(Default)]
@@ -930,9 +998,17 @@ fn install(
                 .find("PS3_GAME/PARAM.SFO")
                 .and_then(|e| img.read_file(&e).ok())
                 .and_then(|d| game::parse_sfo(&d))
-                .map(|sfo| sfo.get("TITLE_ID").map(|t| t == "BCUS98119").unwrap_or(false))
+                .map(|sfo| {
+                    sfo.get("TITLE_ID")
+                        .map(|t| t == "BCUS98119")
+                        .unwrap_or(false)
+                })
                 .unwrap_or(false);
-            let dest = o.location.join(if usa { "inFamous [BCUS98119]" } else { o.link_name.as_str() });
+            let dest = o.location.join(if usa {
+                "inFamous [BCUS98119]"
+            } else {
+                o.link_name.as_str()
+            });
             let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
             let stamp = format!("{}|{}", path.display(), meta.len());
             let marker = dest.join(".copied-from-disc-image");
@@ -997,6 +1073,9 @@ fn install(
         cmd.arg("--rpcs3").arg(r);
     }
     run_cli(cmd, &o.location, p, child, &stopped, &set, &log)?;
+
+    save_resolution(&o.location, &o.resolution_scale)?;
+    log(format!("Resolution saved: {}", o.resolution_scale));
 
     // 4. Shortcuts.
     set(0.995, "Creating shortcuts", "");
@@ -1261,6 +1340,37 @@ pub fn open_url(u: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_resolution_creates_and_preserves_settings() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!(
+                "resolution-settings-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        for (i, (scale, _)) in RESOLUTIONS.iter().enumerate() {
+            save_resolution(&root, scale).unwrap();
+            assert_eq!(installed_resolution(&root), Some(i));
+        }
+        let path = root.join("infamous-recomp/settings.ini");
+        std::fs::write(&path, "; Player settings\r\nFULLSCREEN=1\r\n RES_SCALE = 3\r\nPAD_MOUSE_SPEED=325\r\nCUSTOM=value\r\nRES_SCALE=2\r\n").unwrap();
+        save_resolution(&root, "1.5").unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("; Player settings\nFULLSCREEN=1\n"));
+        assert!(saved.contains("PAD_MOUSE_SPEED=325\nCUSTOM=value\n"));
+        assert_eq!(saved.matches("RES_SCALE=").count(), 1);
+        assert_eq!(installed_resolution(&root), Some(1));
+        assert!(save_resolution(&root, "invalid").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(root.join("infamous-recomp")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
 
     #[test]
     fn phases() {

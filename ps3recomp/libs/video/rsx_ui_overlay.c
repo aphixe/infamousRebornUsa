@@ -23,6 +23,10 @@
 #include <string.h>
 
 #include "rsx_ui_trainer.h"
+#include "../input/pad_prompt_mode.h"
+#ifdef PS3RECOMP_SDL3
+#include "../input/pad_sdl3.h"
+#endif
 /* rsx_ui_trainer.h: the title's trainer page (F10); NULL = no trainer. */
 const uiov_trainer_api* volatile g_uiov_trainer = 0;
 
@@ -191,12 +195,25 @@ int uiov_pad_gate(void)
 
 /* ---------------- input ---------------- */
 enum { IN_OK = 1, IN_BACK = 2, IN_LEFT = 4, IN_RIGHT = 8, IN_TAB = 16, IN_UP = 32, IN_DOWN = 64, IN_SELECT = 128 };
+extern volatile int g_input_kbm;
+extern volatile int g_input_controller_xbox;
+extern void ps3_pad_note_controller(int xbox);
+extern volatile int g_ui_kbm_glyphs;
+static int dialog_prompt_mode(void)
+{
+    const char* env = getenv("KBM_GLYPHS");
+    int mode = g_ui_kbm_glyphs >= 0 ? g_ui_kbm_glyphs : (env && *env ? atoi(env) : 1);
+    /* Before the first input, PC is the natural default for this native port. */
+    return pad_prompt_mode(mode, g_input_kbm, g_input_controller_xbox);
+}
 static unsigned read_input(HWND hwnd)
 {
     unsigned b = 0;
-    for (DWORD i = 0; i < 4; i++) {
+    int xi_connected = 0;
+    for (DWORD i = 0; i < 1; i++) { /* port 0 owns this single-player dialog */
         XINPUT_STATE st; memset(&st, 0, sizeof st);
         if (XInputGetState(i, &st) != ERROR_SUCCESS) continue;
+        xi_connected = 1;
         WORD w = st.Gamepad.wButtons;
         if (w & XINPUT_GAMEPAD_A) b |= IN_OK;
         if (w & XINPUT_GAMEPAD_B) b |= IN_BACK;
@@ -206,6 +223,25 @@ static unsigned read_input(HWND hwnd)
         if ((w & XINPUT_GAMEPAD_DPAD_DOWN) || st.Gamepad.sThumbLY < -16000) b |= IN_DOWN;
         if (w & XINPUT_GAMEPAD_BACK) b |= IN_SELECT;
     }
+    if (b) ps3_pad_note_controller(1);
+#ifdef PS3RECOMP_SDL3
+    /* SDL fills player one's port only when XInput has left it empty. Dialogs
+     * bypass cellPad, so consume the same SDL snapshot here as gameplay does. */
+    if (!xi_connected) {
+        PadSdlPad pad;
+        if (pad_sdl3_get(&pad, 1) && pad.connected) {
+            unsigned m = pad.buttons;
+            if (m & 0x4000) b |= IN_OK;
+            if (m & 0x2000) b |= IN_BACK;
+            if ((m & 0x0080) || pad.lx < 80) b |= IN_LEFT;
+            if ((m & 0x0020) || pad.lx > 176) b |= IN_RIGHT;
+            if ((m & 0x0010) || pad.ly < 80) b |= IN_UP;
+            if ((m & 0x0040) || pad.ly > 176) b |= IN_DOWN;
+            if (m & 0x0001) b |= IN_SELECT;
+            if (b) ps3_pad_note_controller(pad.xbox_glyphs);
+        }
+    }
+#endif
     { extern volatile unsigned g_pad_file_held;   /* v219: PAD_FILE (unattended bench driver), PS3 button mask */
       const unsigned m = g_pad_file_held;
       if (m & 0x4000) b |= IN_OK;     if (m & 0x2000) b |= IN_BACK;
@@ -213,6 +249,8 @@ static unsigned read_input(HWND hwnd)
       if (m & 0x0010) b |= IN_UP;     if (m & 0x0040) b |= IN_DOWN;
       if (m & 0x0001) b |= IN_SELECT; }
     if (hwnd && GetForegroundWindow() == hwnd) {
+        unsigned controller = b;
+        b = 0;
         #define K(vk) (GetAsyncKeyState(vk) & 0x8000)
         if (K(VK_RETURN) || K(VK_SPACE) || K('Z')) b |= IN_OK;
         if (K(VK_ESCAPE) || K(VK_BACK) || K('X') || K('C')) b |= IN_BACK;
@@ -222,6 +260,8 @@ static unsigned read_input(HWND hwnd)
         if (K(VK_UP) || K('W')) b |= IN_UP;
         if (K(VK_DOWN) || K('S')) b |= IN_DOWN;
         #undef K
+        if (b) g_input_kbm = 1;
+        b |= controller;
     }
     return b;
 }
@@ -288,7 +328,10 @@ static void text_draw(const char* s, int n, float x, float y, float size, const 
 }
 static float icon_draw(unsigned code, float x, float y, float size, float alpha)
 {
-    const UGlyph* g = glyph(code, 1); if (!g) return 0;
+    const int mode = dialog_prompt_mode();
+    const UGlyph* g = mode ? glyph(code + (mode == 2 ? 0x200u : 0x100u), 1) : NULL;
+    if (!g) g = glyph(code, 1);
+    if (!g) return 0;
     float sc = size / s_iline, c[4]; rgba(c, 1, 1, 1, alpha);
     quad_uv(x, y, x + g->w * sc, y + g->h * sc, (float)g->x / s_aw, (float)g->y / s_ah,
             (float)(g->x + g->w) / s_aw, (float)(g->y + g->h) / s_ah, c, c, 0);
@@ -513,14 +556,14 @@ int (*volatile g_uiov_paused_fn)(void) = 0;
 /* v195: set by the native pause-menu entries (stubs.cpp, script natives on the PPU thread): 1 = Settings, 2 = Quit Game */
 volatile int g_uiov_request = 0;
 /* v243K: val/name 8 -> 12 (Language has 12 choices) */
-typedef struct { const char* key; const char* label; int restart; int n; const char* val[12]; const char* name[12]; int cur, saved; } MItem;
+typedef struct { const char* key; const char* label; int restart; int n; const char* val[20]; const char* name[20]; int cur, saved; } MItem;
 static MItem s_mi[] = {
     { "FULLSCREEN",      "Display Mode",       0, 2, { "0", "1" }, { "Windowed", "Fullscreen" } },
     { "PRESENT_VSYNC",   "VSync",              0, 2, { "0", "1" }, { "Off", "On" } },
     { "UI_FPS_CAP",      "Frame Rate Limit",   0, 6, { "0", "60", "50", "45", "40", "30" }, { "Off", "60 FPS", "50 FPS", "45 FPS", "40 FPS", "30 FPS" } },   /* v209b: Auto removed */
-    { "KBM_GLYPHS",      "Button Prompts",     0, 3, { "1", "0", "2" }, { "Automatic", "Controller", "Keyboard & Mouse" } },
+    { "KBM_GLYPHS",      "Button Prompts",     0, 5, { "1", "0", "2", "3", "4" }, { "Automatic", "Controller", "Keyboard & Mouse", "PlayStation", "Xbox" } },
     { "PAD_MOUSE_SPEED", "Mouse Speed",        0, 5, { "900", "650", "450", "325", "225" }, { "1 (Slow)", "2", "3", "4", "5 (Fast)" } },
-    { "RES_SCALE",       "Resolution",         1, 5, { "1", "1.5", "2", "2.5", "3" }, { "720p", "1080p", "1440p", "1800p", "2160p (4K)" } },
+    { "RES_SCALE", "Resolution", 1, 17, { "1280x720", "1920x1080", "2560x1440", "3200x1800", "3840x2160", "1024x768", "1280x960", "1280x1024", "1366x768", "1600x900", "1600x1200", "1680x1050", "1920x1200", "2560x1080", "2560x1600", "3440x1440", "1280x800" }, { "1280x720", "1920x1080", "2560x1440", "3200x1800", "3840x2160", "1024x768", "1280x960", "1280x1024", "1366x768", "1600x900", "1600x1200", "1680x1050", "1920x1200", "2560x1080", "2560x1600", "3440x1440", "1280x800 (Steam Deck)" } },
     { "SHADOWS",         "Shadows",            1, 2, { "1", "0" }, { "On", "Off" } },
     { "TEX_ANISO",       "Texture Filtering",  1, 5, { "-1", "0", "4", "8", "16" }, { "Game Default", "Bilinear", "4x Anisotropic", "8x Anisotropic", "16x Anisotropic" } },
     { "TEX_MIPS",        "Mipmaps",            1, 2, { "1", "0" }, { "On", "Off" } },
@@ -557,7 +600,11 @@ static int mi_match(const MItem* m, const char* v)
     if (!v || !*v) return -1;
     for (int i = 0; i < m->n; i++) {
         if (!strcmp(m->val[i], v)) return i;
-        if (!strcmp(m->key, "RES_SCALE") && fabs(atof(m->val[i]) - atof(v)) < 0.01) return i;
+
+    }
+    if (!strcmp(m->key, "RES_SCALE") && !strchr(v,'x')) {
+        const float legacy[5] = {1,1.5f,2,2.5f,3};
+        for (int i=0;i<5;i++) if (fabs(atof(v)-legacy[i])<0.01f) return i;
     }
     return -1;
 }
@@ -625,8 +672,12 @@ static int mouse_virt(HWND hwnd, unsigned bbw, unsigned bbh, float* vx, float* v
     POINT pt; RECT rc;
     if (!hwnd || GetForegroundWindow() != hwnd || !GetCursorPos(&pt) || !ScreenToClient(hwnd, &pt) || !GetClientRect(hwnd, &rc) || rc.bottom <= 0) return 0;
     if (pt.x < 0 || pt.y < 0 || pt.x >= rc.right || pt.y >= rc.bottom) return 0;
-    *vx = pt.x * (UIOV_VW_H / (float)rc.bottom) * ((float)rc.bottom / rc.right) * ((float)bbw / bbh);
-    *vy = pt.y * (UIOV_VW_H / (float)rc.bottom);
+    float nx = (float)pt.x / rc.right, ny = (float)pt.y / rc.bottom;
+    extern void rsx_display_pointer(float*,float*);
+    rsx_display_pointer(&nx,&ny);
+    if (nx<0 || nx>1 || ny<0 || ny>1) return 0;
+    *vx = nx * UIOV_VW_H * (float)bbw / bbh;
+    *vy = ny * UIOV_VW_H;
     return 1;
 }
 /* returns 1 when the menu (or the hint) wants to draw this frame */
@@ -1070,8 +1121,8 @@ void uiov_render(ID3D12Device* dev, ID3D12GraphicsCommandList* cl, D3D12_CPU_DES
         int lb = (hwnd && GetForegroundWindow() == hwnd && (GetAsyncKeyState(VK_LBUTTON) & 0x8000)) ? 1 : 0;
         POINT pt; RECT rc;
         if (hwnd && s_nb && GetCursorPos(&pt) && ScreenToClient(hwnd, &pt) && GetClientRect(hwnd, &rc) && rc.bottom > 0) {
-            float vx = pt.x * (UIOV_VW_H / (float)rc.bottom), vy = pt.y * (UIOV_VW_H / (float)rc.bottom);
-            vx *= ((float)rc.bottom / rc.right) * ((float)bbw / bbh);   /* client aspect may differ from backbuffer */
+            float vx=-1, vy=-1;
+            mouse_virt(hwnd,bbw,bbh,&vx,&vy);
             for (int i = 0; i < s_nb; i++)
                 if (vx >= s_br[i].x0 && vx <= s_br[i].x1 && vy >= s_br[i].y0 && vy <= s_br[i].y1) {
                     static POINT s_last; if (pt.x != s_last.x || pt.y != s_last.y) D.sel = i;

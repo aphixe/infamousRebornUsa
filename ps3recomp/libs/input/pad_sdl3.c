@@ -160,6 +160,8 @@ static void stick(Sint16 x, Sint16 y, uint8_t* ox, uint8_t* oy)
 
 static void read_pad(SDL_Gamepad* g, PadSdlPad* o)
 {
+    const SDL_GamepadType type = p_SDL_GetGamepadType(g);
+    o->xbox_glyphs = type == SDL_GAMEPAD_TYPE_XBOX360 || type == SDL_GAMEPAD_TYPE_XBOXONE || type == SDL_GAMEPAD_TYPE_STEAM;
     uint16_t b = 0;
 #define B(sdl, ps3) if (p_SDL_GetGamepadButton(g, sdl)) b |= ps3;
     B(SDL_GAMEPAD_BUTTON_SOUTH, CELL_PAD_CTRL_CROSS)  B(SDL_GAMEPAD_BUTTON_EAST, CELL_PAD_CTRL_CIRCLE)

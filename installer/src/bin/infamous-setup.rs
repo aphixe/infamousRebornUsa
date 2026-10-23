@@ -163,47 +163,10 @@ fn bolt_points(origin: egui::Pos2, size: f32) -> Vec<egui::Pos2> {
 }
 
 fn window_icon() -> egui::IconData {
-    let n = 64usize;
-    let pts: Vec<(f32, f32)> = [(0.64, 0.10), (0.30, 0.52), (0.62, 0.48), (0.36, 0.92)]
-        .iter()
-        .map(|&(x, y)| (x * n as f32, y * n as f32))
-        .collect();
-    let dist = |px: f32, py: f32| -> f32 {
-        pts.windows(2)
-            .map(|w| {
-                let ((ax, ay), (bx, by)) = (w[0], w[1]);
-                let (dx, dy) = (bx - ax, by - ay);
-                let t = (((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
-                ((px - ax - t * dx).powi(2) + (py - ay - t * dy).powi(2)).sqrt()
-            })
-            .fold(f32::MAX, f32::min)
-    };
-    let mut rgba = vec![0u8; n * n * 4];
-    for y in 0..n {
-        for x in 0..n {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            // rounded square background
-            let r = 12.0;
-            let (cx, cy) = (fx.clamp(r, n as f32 - r), fy.clamp(r, n as f32 - r));
-            let inside_bg = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt() <= r;
-            let d = dist(fx, fy);
-            let i = (y * n + x) * 4;
-            if d < 5.0 {
-                let a = (5.0 - d).clamp(0.0, 1.0);
-                let (r0, g0, b0) = (0x10 as f32, 0x13 as f32, 0x19 as f32);
-                rgba[i] = (r0 + (0x6C as f32 - r0) * a) as u8;
-                rgba[i + 1] = (g0 + (0xC0 as f32 - g0) * a) as u8;
-                rgba[i + 2] = (b0 + (0xFF as f32 - b0) * a) as u8;
-                rgba[i + 3] = 255;
-            } else if inside_bg {
-                rgba[i..i + 4].copy_from_slice(&[0x10, 0x13, 0x19, 255]);
-            }
-        }
-    }
     egui::IconData {
-        rgba,
-        width: n as u32,
-        height: n as u32,
+        rgba: include_bytes!("../../assets/icon-64.rgba").to_vec(),
+        width: 64,
+        height: 64,
     }
 }
 
@@ -273,6 +236,8 @@ struct App {
     location: String,
     desktop: bool,
     start_menu: bool,
+    resolution: usize,
+    resolution_location: String,
 
     installer: Option<Installer>,
     show_log: bool,
@@ -317,6 +282,8 @@ impl App {
             location: String::new(),
             desktop: true,
             start_menu: true,
+            resolution: 1,
+            resolution_location: String::new(),
             installer: None,
             show_log: false,
             confirm_cancel: false,
@@ -640,6 +607,7 @@ impl App {
             start_menu: self.start_menu,
             game_title: self.title.clone(),
             link_name: self.link_name.clone(),
+            resolution_scale: setup::RESOLUTIONS[self.resolution].0.into(),
         };
         self.installer = Some(Installer::start(opts, self.repaint.clone()));
         self.confirm_cancel = false;
@@ -1001,6 +969,24 @@ impl App {
                     .color(WARN),
                 );
             }
+        });
+        if self.resolution_location != self.location.trim() {
+            self.resolution =
+                setup::installed_resolution(Path::new(self.location.trim())).unwrap_or(1);
+            self.resolution_location = self.location.trim().into();
+        }
+        card(ui, |ui| {
+            ui.label(RichText::new("Game resolution").strong());
+            egui::ComboBox::from_id_salt("install_resolution")
+                .selected_text(setup::RESOLUTIONS[self.resolution].1)
+                .width(240.0)
+                .show_ui(ui, |ui| {
+                    for (i, (_, label)) in setup::RESOLUTIONS.iter().enumerate() {
+                        ui.selectable_value(&mut self.resolution, i, *label);
+                    }
+                });
+            ui.label(RichText::new("1080p is the default for new installations. Higher resolutions need more GPU power. You can change this later in the launcher or game Settings.").small().color(MUTED));
+            ui.label(RichText::new("Other screen shapes keep the game's original proportions with black bars. Choose your monitor's native resolution when possible.").small().color(MUTED));
         });
         card(ui, |ui| {
             ui.checkbox(&mut self.desktop, "Create a desktop shortcut");

@@ -224,9 +224,45 @@ const DISPLAY: &[Row] = &[
     Row {
         key: "RES_SCALE",
         label: "Resolution",
-        hint: "Internal rendering resolution.",
-        vals: &["1", "1.5", "2", "2.5", "3"],
-        names: &["720p", "1080p", "1440p", "1800p", "2160p (4K)"],
+        hint: "Output resolution. Other aspect ratios preserve the picture with black bars.",
+        vals: &[
+            "1280x720",
+            "1920x1080",
+            "2560x1440",
+            "3200x1800",
+            "3840x2160",
+            "1024x768",
+            "1280x960",
+            "1280x1024",
+            "1366x768",
+            "1600x900",
+            "1600x1200",
+            "1680x1050",
+            "1920x1200",
+            "2560x1080",
+            "2560x1600",
+            "3440x1440",
+            "1280x800",
+        ],
+        names: &[
+            "1280x720",
+            "1920x1080",
+            "2560x1440",
+            "3200x1800",
+            "3840x2160",
+            "1024x768",
+            "1280x960",
+            "1280x1024",
+            "1366x768",
+            "1600x900",
+            "1600x1200",
+            "1680x1050",
+            "1920x1200",
+            "2560x1080",
+            "2560x1600",
+            "3440x1440",
+            "1280x800 (Steam Deck)",
+        ],
         fallback: 0,
     },
     Row {
@@ -435,10 +471,7 @@ impl Row {
         }
         self.vals.iter().position(|x| *x == v).or_else(|| {
             if self.key == "RES_SCALE" {
-                let f: f64 = v.parse().ok()?;
-                self.vals
-                    .iter()
-                    .position(|x| (x.parse::<f64>().unwrap_or(-9.0) - f).abs() < 0.01)
+                infamous_installer::setup::resolution_index(v)
             } else {
                 None
             }
@@ -1590,43 +1623,12 @@ mod win {
 /// The app icon (a zig-zag bolt on a dark rounded square), `n` x `n` RGBA.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn icon_rgba(n: usize) -> Vec<u8> {
-    let k = n as f32 / 64.0;
-    let pts: Vec<(f32, f32)> = [(0.64, 0.10), (0.30, 0.52), (0.62, 0.48), (0.36, 0.92)]
-        .iter()
-        .map(|&(x, y)| (x * n as f32, y * n as f32))
-        .collect();
-    let dist = |px: f32, py: f32| -> f32 {
-        pts.windows(2)
-            .map(|w| {
-                let ((ax, ay), (bx, by)) = (w[0], w[1]);
-                let (dx, dy) = (bx - ax, by - ay);
-                let t = (((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
-                ((px - ax - t * dx).powi(2) + (py - ay - t * dy).powi(2)).sqrt()
-            })
-            .fold(f32::MAX, f32::min)
-    };
-    let mut rgba = vec![0u8; n * n * 4];
-    let (r, thick) = (12.0 * k, (5.0 * k).max(1.6));
-    for y in 0..n {
-        for x in 0..n {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            let (cx, cy) = (fx.clamp(r, n as f32 - r), fy.clamp(r, n as f32 - r));
-            let inside_bg = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt() <= r;
-            let d = dist(fx, fy);
-            let i = (y * n + x) * 4;
-            if d < thick {
-                let a = (thick - d).clamp(0.0, 1.0);
-                let (r0, g0, b0) = (0x10 as f32, 0x13 as f32, 0x19 as f32);
-                rgba[i] = (r0 + (0x6C as f32 - r0) * a) as u8;
-                rgba[i + 1] = (g0 + (0xC0 as f32 - g0) * a) as u8;
-                rgba[i + 2] = (b0 + (0xFF as f32 - b0) * a) as u8;
-                rgba[i + 3] = 255;
-            } else if inside_bg {
-                rgba[i..i + 4].copy_from_slice(&[0x10, 0x13, 0x19, 255]);
-            }
-        }
+    match n {
+        16 => include_bytes!("../../assets/icon-16.rgba").to_vec(),
+        32 => include_bytes!("../../assets/icon-32.rgba").to_vec(),
+        64 => include_bytes!("../../assets/icon-64.rgba").to_vec(),
+        _ => panic!("Unsupported launcher icon size: {n}"),
     }
-    rgba
 }
 
 fn main() {

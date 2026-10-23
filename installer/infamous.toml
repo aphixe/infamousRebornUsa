@@ -47,6 +47,8 @@ include = [
   "infamous-recomp/assets/ui_font_preview.png",
   "infamous-recomp/assets/kbm_icons.bin",
   "infamous-recomp/assets/kbm_prompts.bin",
+  "infamous-recomp/assets/xbox_icons.bin",
+  "infamous-recomp/assets/xbox_prompts.bin",
   "infamous-recomp/assets/font_icons_l0.bin",
 ]
 exclude = [
@@ -67,6 +69,8 @@ loose = [
   "infamous-recomp/assets/font_icons_l0.bin",
   "infamous-recomp/assets/kbm_icons.bin",
   "infamous-recomp/assets/kbm_prompts.bin",
+  "infamous-recomp/assets/xbox_icons.bin",
+  "infamous-recomp/assets/xbox_prompts.bin",
 ]
 # Small files whose patch may legitimately replace most of the content (no game code in them).
 full_patch_ok = [
@@ -195,7 +199,7 @@ title = "Keyboard/mouse prompt atlas"
 cwd = "{port}/tools"
 run = ["{python}", "make_kbm_icons.py"]
 optional = true
-outputs = ["infamous-recomp/assets/kbm_icons.bin"]
+outputs = ["infamous-recomp/assets/kbm_icons.bin", "infamous-recomp/assets/xbox_icons.bin"]
 
 [[step]]
 id = "kbm-prompts-xpp"
@@ -210,7 +214,7 @@ title = "HUD prompt textures: keyboard/mouse versions"
 cwd = "{port}/tools"
 run = ["{python}", "make_kbm_prompts.py", "{work}/xpp/core.xpp", "{port}/assets/kbm_prompts.bin"]
 optional = true
-outputs = ["infamous-recomp/assets/kbm_prompts.bin"]
+outputs = ["infamous-recomp/assets/kbm_prompts.bin", "infamous-recomp/assets/xbox_prompts.bin"]
 
 # ---------------------------------------------------------------------------------------------
 # Build (same settings as infamous-recomp/build.cmd, but in its own build-install folder so an

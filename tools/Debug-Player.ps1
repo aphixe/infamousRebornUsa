@@ -3,7 +3,9 @@ param(
     [Parameter(Mandatory = $true)][string]$Elf,
     [Parameter(Mandatory = $true)][string]$GameRoot,
     # Windows audio session volume of the player, percent (debug runs: 1 unless asked otherwise)
-    [ValidateRange(0, 100)][int]$Volume = 1
+    [ValidateRange(0, 100)][int]$Volume = 1,
+    # internal resolution scale (1 = 720p, 3 = 3840x2160)
+    [ValidateSet('1', '1.5', '2', '2.5', '3')][string]$ResScale = '1'
 )
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
@@ -23,6 +25,7 @@ $taskLaunchEnv['FULLSCREEN'] = '0'
 $taskLaunchEnv['RES_SCALE'] = '1'
 $taskLaunchEnv['PS3_VFS_ROOT'] = $taskGame
 $taskLaunchEnv['INFAMOUS_DEBUG_VOLUME'] = "$Volume"
+$taskLaunchEnv['INFAMOUS_DEBUG_RES_SCALE'] = $ResScale
 $taskLaunchEnv['PS3_TITLE'] = "inFamous USA - Debug (windowed, audio $Volume%)"
 $taskLaunchEnv['INFAMOUS_HANGDUMP'] = '15,30,60'
 # The manifest's poll site is the EU address of the worker-pool wait; the USA build's is 0x52493C.

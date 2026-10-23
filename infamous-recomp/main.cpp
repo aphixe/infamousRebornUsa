@@ -906,9 +906,12 @@ int main(int argc, char** argv)
     /* Local debugging profile wins over persisted display settings. */
     if (const char* debug = getenv("INFAMOUS_DEBUG_PLAYER")) {
         if (!strcmp(debug, "1")) {
+            /* INFAMOUS_DEBUG_RES_SCALE: internal resolution for the debug run (default 1 = 720p) */
+            const char* drs = getenv("INFAMOUS_DEBUG_RES_SCALE");
+            if (!drs || !*drs) drs = "1";
             _putenv_s("FULLSCREEN", "0");
-            _putenv_s("RES_SCALE", "1");
-            fprintf(stderr, "[debug-player] windowed, native resolution, audio session 1%%\n");
+            _putenv_s("RES_SCALE", drs);
+            fprintf(stderr, "[debug-player] windowed, resolution scale %s\n", drs);
         }
     }
     /* v242B LOW_CPU=1 (default OFF): opt-in preset for weak CPUs. These are QUALITY levers -- the game looks/animates
@@ -969,6 +972,9 @@ int main(int argc, char** argv)
     /* Run the interpreted Bink worker as a persistent SPU thread (boot once,
      * resume at its receive-event wait) instead of re-booting it per frame.
      * RD_SPU_PERSIST=0 reverts. */
+    /* local-4k: render at 3x the PS3's 720p = 3840x2160 unless the launcher or settings.ini says otherwise
+     * (windowed start; Alt+Enter or F11 = fullscreen). */
+    set_default_env("RES_SCALE", "3");
     set_default_env("RD_SPU_PERSIST", "1");
     /* Run the Bink decoder as the lifted (native) SPU thread it is, with a real
      * sys_spu_thread_receive_event, instead of re-running it in the SPU

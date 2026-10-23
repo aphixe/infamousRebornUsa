@@ -78,11 +78,21 @@ those replace the installer and the game's launcher too (a running copy is renam
 
 `inFamous Setup.exe` is a normal Windows installer window: Welcome → Requirements (Python and
 the C++ build tools, with **Install** buttons that use winget) → Your game (pick the **.iso** or a
-game folder; encrypted Redump images work with their `.dkey` next to them) → Install location →
+game folder; encrypted Redump images work with their `.dkey` next to them) → Install location and resolution →
 progress bar → **Play**. It carries the whole publishable tree inside itself, extracts it to the
 chosen folder, copies the game out of the disc image, runs `infamous-installer install` there and
 creates `inFamous.exe` (starts the game without a console) plus desktop/Start-menu shortcuts.
 Running it again on the same folder repairs/updates and only redoes what changed.
+The resolution selector offers 17 presets, including 720p through 4K, common 4:3,
+5:4, 16:10 and ultrawide sizes, and **1280 x 800 (Steam Deck)**. New installations
+start with 1080p selected; choosing an existing installation loads its current
+resolution. Setup saves the selected value to `infamous-recomp/settings.ini`
+after a successful build, preserving the other settings. Players can change it
+later in the launcher or in-game Settings. Other aspect ratios retain the game's
+16:9 picture with centered black bars. Older numeric RES_SCALE settings still work.
+Setup and the game launcher embed the generated inFamous icon, also used by the
+desktop and Start-menu shortcuts. Steam Deck is a resolution preset here; the
+installer and game are still Windows builds.
 
 Build it (maintainer, after `make-patches`):
 
