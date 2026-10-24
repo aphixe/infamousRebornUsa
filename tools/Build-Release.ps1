@@ -21,7 +21,8 @@ try {
     $env:TEMP = Join-Path $root '.local\release-test-temp'
     $env:TMP = $env:TEMP
     New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
-    Write-Host 'Running installer tests with Cargo.lock enforced...'
+    $env:CARGO_ENCODED_RUSTFLAGS = if ($oldEncodedFlags) { $oldEncodedFlags + [char]31 + '-Dwarnings' } else { '-Dwarnings' }
+    Write-Host 'Running installer tests with Cargo.lock enforced and warnings treated as errors...'
     cargo test --locked
     if ($LASTEXITCODE -ne 0) { throw 'Installer tests failed; release files were not created.' }
 
@@ -30,6 +31,7 @@ try {
     $cargoRoot = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
     $rustupRoot = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
     $env:CARGO_ENCODED_RUSTFLAGS = @(
+        '-Dwarnings',
         "--remap-path-prefix=$cargoRoot\registry\src=/cargo/registry",
         "--remap-path-prefix=$cargoRoot\git=/cargo/git",
         "--remap-path-prefix=$rustupRoot=/rustup",

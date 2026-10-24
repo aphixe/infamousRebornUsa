@@ -213,7 +213,6 @@ struct Reqs {
 
 struct App {
     page: Page,
-    setup_exe: PathBuf,
     source: Option<setup::Source>,
     payload_bytes: u64,
     load_error: Option<String>,
@@ -259,7 +258,6 @@ impl App {
         let setup_exe = std::env::current_exe().unwrap_or_default();
         let mut app = App {
             page: Page::Welcome,
-            setup_exe: setup_exe.clone(),
             source: None,
             payload_bytes: 0,
             load_error: None,

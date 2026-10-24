@@ -135,8 +135,9 @@ tools/Build-Release.ps1 -Version 2.1
 
 This formats all Rust sources, verifies the same formatting rule as GitHub Actions,
 runs the installer tests, and builds the full Setup and no-compilation Quick Update
-EXEs with checksums under `dist/release/v2.1`. It stops on any failed check. Commit
-the formatted source changes before pushing or creating the release tag; uploading
+EXEs with checksums under `dist/release/v2.1`. It stops on any failed check.
+Tests and release builds treat Rust warnings as errors, matching GitHub Actions.
+Commit the formatted source changes before pushing or creating the release tag; uploading
 download files alone does not update the source revision checked by Actions.
 
 For a check without rewriting files: `cd installer; cargo fmt --all -- --check`.

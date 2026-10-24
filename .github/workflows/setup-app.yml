@@ -19,6 +19,8 @@ jobs:
   build:
     name: Build (Windows)
     runs-on: windows-latest
+    env:
+      RUSTFLAGS: -Dwarnings
     defaults:
       run:
         working-directory: installer
